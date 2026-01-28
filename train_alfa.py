@@ -108,7 +108,7 @@ class UADConfig:
     uad_huber_delta: float = 1.0
     uad_lambda_delta: float = 0.2
 
-    # model capacity (按你的 STGraphTCN 签名)
+    # model capacity (matching your STGraphTCN signature)
     uad_d_model: int = 64
     uad_nhead: int = 8
     uad_tcn_layers: int = 4
@@ -119,10 +119,10 @@ class UADConfig:
     uad_horizon_out: int = 1
     uad_use_dynamic_graph: bool = True
 
-    # —— 新增：与本脚本训练逻辑相关的开关/系数 ——
-    uad_pred_uncert: bool = False         # 模型若支持 μ+logσ² 头，置 True
-    uad_dyn_ent_lambda: float = 0.0      # 动态图负熵正则系数（>0 鼓励高熵，防踩边）
-    uad_grad_clip_norm: float = 5.0       # 梯度裁剪
+    # —— New: switches/coefficients tied to this script's training logic ——
+    uad_pred_uncert: bool = False         # enable if model supports μ+logσ² head
+    uad_dyn_ent_lambda: float = 0.0      # dynamic-graph negative-entropy weight (>0 encourages high entropy)
+    uad_grad_clip_norm: float = 5.0       # gradient clipping
 
     # viz
     uad_topk_nodes_viz: int = 15
@@ -328,7 +328,7 @@ def uad_load_graph(graph_dir: str):
 
     keep_cols = uad_load_keep_columns(graph_dir)
     if keep_cols is None:
-        if not os.path.exists(nodes_fp): raise FileNotFoundError("未找到 keep_columns.json 或 nodes.csv")
+        if not os.path.exists(nodes_fp): raise FileNotFoundError("Missing keep_columns.json or nodes.csv")
         df_nodes = pd.read_csv(nodes_fp)
         if "name" in df_nodes.columns: keep_cols = df_nodes["name"].astype(str).tolist()
         elif "label" in df_nodes.columns: keep_cols = df_nodes["label"].astype(str).tolist()
@@ -352,7 +352,7 @@ def uad_load_graph(graph_dir: str):
             except Exception: A=None
 
     if A is None:
-        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"缺少: {adj_dense_fp} & {adj_sparse_fp}")
+        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"Missing: {adj_dense_fp} & {adj_sparse_fp}")
         dfs = pd.read_csv(adj_sparse_fp)  # row,col,val
         A = np.zeros((N,N), dtype=np.float32)
         r = np.asarray(dfs.get("row", dfs.columns[0]).values, dtype=int)
@@ -404,7 +404,7 @@ class UADDataset(Dataset):
     def _load_one(self, fp: str):
         df = pd.read_csv(fp)
         miss=[c for c in self.cols if c not in df.columns]
-        if miss: raise ValueError(f"[{os.path.basename(fp)}] 列缺失：{miss[:8]} ...")
+        if miss: raise ValueError(f"[{os.path.basename(fp)}] Missing columns: {miss[:8]} ...")
         Xdf = uad_preprocess_cols(df, self.cols, self.cfg)
         Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
         Xdf = uad_input_smooth(Xdf, self.cfg)
@@ -701,25 +701,25 @@ def uad_plot_roc(fpr: np.ndarray, tpr: np.ndarray, auc_value: float, out_png: st
 
 def compute_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
     """
-    与第二段代码一致的、纯 numpy 的 ROC/AUC 计算（不依赖 sklearn）
+    Pure NumPy ROC/AUC calculation consistent with the second snippet (no sklearn dependency).
     """
     y_true = y_true.astype(np.int32)
     y_score = y_score.astype(np.float64)
-    order = np.argsort(-y_score)        # 按分数降序
+    order = np.argsort(-y_score)        # sort by score descending
     y_true = y_true[order]
     y_score = y_score[order]
     P = (y_true == 1).sum()
     N = (y_true == 0).sum()
-    if P == 0 or N == 0:                # 全正或全负 -> 无法计算 AUC
+    if P == 0 or N == 0:                # all positive or all negative -> AUC undefined
         return np.array([0.0,1.0]), np.array([0.0,1.0]), float("nan")
     tps = np.cumsum(y_true == 1)
     fps = np.cumsum(y_true == 0)
     tpr = tps / max(1, P)
     fpr = fps / max(1, N)
-    # 起点补 (0,0)
+    # Add origin (0,0)
     tpr = np.concatenate([[0.0], tpr])
     fpr = np.concatenate([[0.0], fpr])
-    auc = float(np.trapz(tpr, fpr))     # 曲线下面积
+    auc = float(np.trapz(tpr, fpr))     # area under curve
     return fpr, tpr, auc
 
 def uad_labels_from_file(file_path, length: int, lookback:int, horizon:int, label_col:str="failure_status",
@@ -740,7 +740,7 @@ def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback,
                          crop_head_rows: int = 0):
     df = pd.read_csv(file_path)
     miss=[c for c in cols if c not in df.columns]
-    if miss: raise ValueError(f"[{os.path.basename(file_path)}] 列缺失：{miss[:8]} ...")
+    if miss: raise ValueError(f"[{os.path.basename(file_path)}] Missing columns: {miss[:8]} ...")
 
     Xdf = uad_preprocess_cols(df, cols, cfg)
     Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
@@ -759,7 +759,7 @@ def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback,
     if scaler is not None:
         X = np.nan_to_num(scaler.transform(X), nan=0.0, posinf=0.0, neginf=0.0)
 
-    # AdaNorm（文件前段）
+    # AdaNorm (early part of file)
     if cfg.uad_enable_adaptnorm and X.shape[0] >= 50:
         L = max(50, int(round(X.shape[0]*cfg.uad_file_pct)))
         mu_f = np.nanmean(X[:L], axis=0); sd_f = np.nanstd(X[:L], axis=0); sd_f = np.maximum(sd_f, 1e-8)
@@ -823,7 +823,7 @@ class UADTrainer:
         # files
         all_files = uad_list_csvs(cfg.uad_nofail_dir) if cfg.uad_use_all_nofail else \
                     uad_build_train_paths(cfg.uad_nofail_dir, cfg.uad_graph_dir, cfg.uad_train_list)
-        if not all_files: raise FileNotFoundError("未找到 No_Failure 文件。")
+        if not all_files: raise FileNotFoundError("No No_Failure files found.")
         tr_files, va_files = uad_split_filelevel(all_files, cfg.uad_val_ratio, seed=cfg.uad_seed)
         self.train_paths = tr_files[:]; self.val_paths = va_files[:]
         print(f"[DBG] total no-failure files={len(all_files)} | train={len(tr_files)} | val={len(va_files)}")
@@ -833,7 +833,7 @@ class UADTrainer:
         for p in tr_files:
             df=pd.read_csv(p)
             miss=[c for c in self.node_names if c not in df.columns]
-            if miss: raise ValueError(f"[{os.path.basename(p)}] 列缺失：{miss[:8]} ...")
+            if miss: raise ValueError(f"[{os.path.basename(p)}] Missing columns: {miss[:8]} ...")
             Xi=uad_preprocess_cols(df, self.node_names, self.cfg)
             Xi=Xi.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
             Xi=uad_input_smooth(Xi, self.cfg)
@@ -845,11 +845,13 @@ class UADTrainer:
         Xcat=np.concatenate(Xs,axis=0) if len(Xs)>0 else np.empty((0, len(self.node_names)), dtype=np.float32)
 
         if Xcat.size == 0:
-            raise RuntimeError("全局截断后训练数据为空，请检查文件长度或减小 UAD_GLOBAL_HEAD_CROP。")
+            raise RuntimeError(
+                "Training data empty after global crop; check file length or reduce UAD_GLOBAL_HEAD_CROP."
+            )
         var=np.nanstd(Xcat,axis=0); mask_keep=(var>1e-12)
         if not mask_keep.all():
             dropped=[self.node_names[i] for i,b in enumerate(mask_keep) if not b]
-            print(f"[WARN] 运行期恒值列剔除：{dropped[:10]}{'...' if len(dropped)>10 else ''}")
+            print(f"[WARN] Dropped constant columns at runtime: {dropped[:10]}{'...' if len(dropped)>10 else ''}")
             self.node_names=[c for c,b in zip(self.node_names, mask_keep) if b]
             Xcat=Xcat[:,mask_keep]
             idx=torch.from_numpy(np.where(mask_keep)[0].astype(np.int64)).to(cfg.uad_device)
@@ -867,9 +869,9 @@ class UADTrainer:
                                   batch_size=cfg.uad_batch, shuffle=False, num_workers=0, collate_fn=uad_collate)
         print(f"[Data] train windows: {len(self.tr_loader.dataset):,} | val windows: {len(self.va_loader.dataset):,}")
 
-        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model 必须能被 nhead 整除。")
+        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model must be divisible by nhead.")
 
-        # model（按你的 STGraphTCN 接口；若模型支持 pred_uncert / node_drop 等，可在该文件中配置）
+        # model (matching your STGraphTCN interface; configure pred_uncert/node_drop here if supported)
         self.model = STGraphTCN(
             num_nodes_hint=len(self.node_names),
             in_feat=1,
@@ -929,15 +931,15 @@ class UADTrainer:
                    x_last: torch.Tensor,
                    aux: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        与第二段代码一致的损失：
-        loss = main_loss(y_pred, y_true) + λ * L1( (y_pred - x_last) , (y_true - x_last) )
-        - 不使用异方差NLL（忽略 aux['pred_logv']）
-        - 不使用动态图负熵正则（忽略 aux['A_fuse_t']）
+        Loss consistent with the second snippet:
+        loss = main_loss(y_pred, y_true) + λ * L1((y_pred - x_last), (y_true - x_last))
+        - No heteroscedastic NLL (ignore aux['pred_logv'])
+        - No dynamic-graph negative-entropy regularization (ignore aux['A_fuse_t'])
         """
-        # 基础项（由 cfg.uad_loss 与 cfg.uad_huber_delta 控制：mae/mse/huber）
+        # Base term (controlled by cfg.uad_loss and cfg.uad_huber_delta: mae/mse/huber)
         base = uad_main_loss(y_pred, y_true, self.cfg.uad_loss, self.cfg.uad_huber_delta)
 
-        # Δ一致性约束（预测步长与上一个观测的差分要贴近真实差分）
+        # Delta consistency constraint (prediction step vs previous observation difference)
         d_true = y_true - x_last
         d_pred = y_pred - x_last
         loss = base + self.cfg.uad_lambda_delta * F.l1_loss(d_pred, d_true)
@@ -1031,7 +1033,7 @@ class UADTrainer:
             if preds.shape[0]==0: continue
             E_model_all.append(uad_perdim_errors(truth,preds,self.delta_mask))
             E_naive_all.append(uad_perdim_errors(truth,naive,self.delta_mask))
-        if not E_model_all: raise RuntimeError("训练残差收集失败。")
+        if not E_model_all: raise RuntimeError("Failed to collect training residuals.")
         return np.vstack(E_model_all), np.vstack(E_naive_all)
 
     @torch.no_grad()
@@ -1095,7 +1097,7 @@ class UADTrainer:
                                                        self.cfg.uad_lookback,self.cfg.uad_horizon,cfg=self.cfg,
                                                        crop_head_rows=(self.cfg.uad_test_crop_head if tag=="failure" else 0))
         if preds.shape[0]==0:
-            print(f"[Skip] {base}: 数据过短"); return None
+            print(f"[Skip] {base}: data too short"); return None
 
         uad_plot_forecast(t_idx, truth, preds, self.node_names, self.topk_order,
                           K=self.cfg.uad_topk_nodes_viz,
@@ -1131,7 +1133,7 @@ class UADTrainer:
             agg=self.cfg.uad_topk_agg,
             trim_ratio=self.cfg.uad_topk_trim_ratio,
             trim_high_only=self.cfg.uad_topk_trim_high_only)
-            scores = uad_score_smooth(s, self.cfg)  # 复用训练阶段的单路平滑逻辑
+            scores = uad_score_smooth(s, self.cfg)  # reuse single-stream smoothing from training
         # file-adaptive threshold
         thr_file = self._file_adaptive_thr(scores, self.cfg)
         if thr_file is not None:
@@ -1156,7 +1158,7 @@ class UADTrainer:
 
         pred_bin = (scores >= thr).astype(np.int32)
         pred_bin = uad_postprocess(pred_bin, min_run=self.cfg.uad_post_min_run, gap=self.cfg.uad_post_gap)
-        # === 单文件 ROC/AUC ===
+        # === Per-file ROC/AUC ===
         auc_val = None
         if (labels.sum() > 0) and ((labels == 0).sum() > 0):
             fpr_curve, tpr_curve, auc_val = compute_roc_auc(labels, scores)
@@ -1181,7 +1183,7 @@ class UADTrainer:
         print(f"[{base}] P={prec:.4f} R={rec:.4f} F1={f1:.4f} (tp={tp}, fp={fp}, tn={tn}, fn={fn})  thr_file={thr_file if thr_file is not None else 'NA'}")
         return {
             "file": base, "tp": tp, "fp": fp, "tn": tn, "fn": fn,
-            "f1": f1, "prec": prec, "rec": rec, "fpr": None,  # fpr 若需也可计算并填入
+            "f1": f1, "prec": prec, "rec": rec, "fpr": None,  # fpr can be computed and filled if needed
             "auc": auc_val, "scores": scores, "labels": labels
         }
 
@@ -1197,7 +1199,7 @@ class UADTrainer:
                 if r.get("labels") is not None and len(r["labels"]) > 0 and r.get("scores") is not None:
                     glob_labels.append(r["labels"])
                     glob_scores.append(r["scores"])
-        # === 全局 micro-ROC ===
+        # === Global micro-ROC ===
         if glob_labels and glob_scores:
             y = np.concatenate(glob_labels, axis=0)
             s = np.concatenate(glob_scores, axis=0)

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-可视化 GraphBuild 产出的邻接矩阵 adjacency_dense.csv 为热力图。
-- 支持排序方式：none（原序）、degree（按度降序）、spectral（谱排序，Fiedler 向量）
-- 对角线方向：默认从左上到右下（origin='upper'）
-- 自动调节刻度密度，避免标签过多挤在一起
+Visualize GraphBuild adjacency_dense.csv as a heatmap.
+- Ordering: none (original), degree (descending degree), spectral (Fiedler vector)
+- Diagonal direction: top-left to bottom-right by default (origin='upper')
+- Auto-adjust tick density to avoid crowded labels
 
-用法：
+Usage:
     python visualize_adjacency.py \
         --adj_csv out_static_graph_gpsatt/adjacency_dense.csv \
         --order spectral \
@@ -22,23 +22,23 @@ import matplotlib.pyplot as plt
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--adj_csv", default="out_static_graph_alfa/adjacency_dense.csv",
-                    help="邻接矩阵 CSV（GraphBuild 输出）")
+                    help="Adjacency CSV (GraphBuild output)")
     ap.add_argument("--order", choices=["none", "degree", "spectral"], default="spectral",
-                    help="节点重排方式：none/degree/spectral，默认 spectral")
+                    help="Node ordering: none/degree/spectral (default spectral)")
     ap.add_argument("--out_png", default="out_static_graph_alfa/adjacency_heatmap.png",
-                    help="输出图片路径（.png/.pdf/.svg 均可）")
+                    help="Output image path (.png/.pdf/.svg)")
     ap.add_argument("--max_labels", type=int, default=50,
-                    help="坐标轴最多显示的标签数（默认 50）")
+                    help="Max labels per axis (default 50)")
     return ap.parse_args()
 
 
 def _spectral_order(A: np.ndarray) -> np.ndarray:
-    """谱排序：按 Laplacian 第二小特征向量（Fiedler 向量）排序；失败则退化为度排序。"""
+    """Spectral order: sort by the second smallest Laplacian eigenvector (Fiedler); fallback to degree order."""
     n = A.shape[0]
     deg = A.sum(axis=1)
     L = np.diag(deg) - A
     try:
-        evals, evecs = np.linalg.eigh(L)  # 对称矩阵的特征分解
+        evals, evecs = np.linalg.eigh(L)  # symmetric eigen decomposition
         if len(evals) >= 2:
             fiedler = evecs[:, 1]
             return np.argsort(fiedler)
@@ -66,31 +66,31 @@ def reorder(A: np.ndarray, labels: list, mode: str):
 def main():
     args = parse_args()
     adj_path = Path(args.adj_csv)
-    assert adj_path.exists(), f"找不到邻接矩阵文件：{adj_path}"
+    assert adj_path.exists(), f"Adjacency matrix not found: {adj_path}"
 
-    # 读矩阵（第一列为索引）
+    # Read matrix (first column is index)
     df = pd.read_csv(adj_path, index_col=0)
     labels = df.index.astype(str).tolist()
     A = df.values.astype(float)
 
-    # 清理 & 对称化
+    # Clean & symmetrize
     A = np.nan_to_num(A, nan=0.0, posinf=1.0, neginf=0.0)
     A = 0.5 * (A + A.T)
     A = np.clip(A, 0.0, 1.0)
 
-    # 重排
+    # Reorder
     A_ord, labels_ord, idx = reorder(A, labels, args.order)
 
     n = A_ord.shape[0]
     figsize = (min(0.2 * n + 4, 20), min(0.2 * n + 4, 20))
 
     fig, ax = plt.subplots(figsize=figsize, dpi=150)
-    # 关键调整：origin='upper' → 对角线从左上到右下
+    # Key adjustment: origin='upper' → diagonal goes top-left to bottom-right
     im = ax.imshow(A_ord, origin="upper", interpolation="nearest")
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("weight", rotation=90)
 
-    # 轴标签稀疏化
+    # Sparsify axis labels
     step = max(1, n // max(1, args.max_labels))
     xticks = np.arange(0, n, step)
     yticks = np.arange(0, n, step)
@@ -107,7 +107,7 @@ def main():
     out_path = Path(args.out_png)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
-    print(f"[OK] 保存热力图：{out_path}")
+    print(f"[OK] Saved heatmap: {out_path}")
 
 
 if __name__ == "__main__":

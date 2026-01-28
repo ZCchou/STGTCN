@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # =============================================
 # ST-Graph-TCN (enhanced)
-# - DropPath（随机深度）用于残差支路
-# - DropNode（节点级随机丢弃，仅训练期）
-# - 动态图：温度缩放、对称化、去自环
-# - 返回整段动态图以便做熵正则（高熵=防过拟合）
-# - 异方差预测头：输出 μ 与 logσ²（可开关）
+# - DropPath (stochastic depth) for residual branches
+# - DropNode (node-level dropout, training only)
+# - Dynamic graph: temperature scaling, symmetrization, remove self-loops
+# - Return full dynamic graph for entropy regularization (high entropy = anti-overfitting)
+# - Heteroscedastic head: outputs μ and logσ² (optional)
 #   forward(x, A, M) -> y_hat:[B,H,N,1], aux:{pred_logv?, A_fuse, A_fuse_t}
 # =============================================
 from __future__ import annotations
