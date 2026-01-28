@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 GPSDATA Forecast + Anomaly Detection + Ablations (no_time / no_space)
-- 数据处理/读入完全参考：UAV Forecast + AD (GPS Attack, Failure 30/70 Split)
-- 数据目录：
-    gpsdata/No_Failure/*.csv        (Benign：训练/验证；若仅 1 个文件则内部时间切分)
-    gpsdata/Failure/*.csv           (每个文件：裁剪后前 30% 加入训练；后 70% 仅测试)
-- 图结构目录：out_static_graph_gpsatt
-- 标签列：label (0/1), 时间戳列：timestamp（不作为特征）
-- 输出目录：
+- Data processing/loading follows: UAV Forecast + AD (GPS Attack, Failure 30/70 Split)
+- Data directories:
+    gpsdata/No_Failure/*.csv        (Benign: train/val; if only 1 file, split by time)
+    gpsdata/Failure/*.csv           (per file: first 30% after crop added to train; last 70% test only)
+- Graph directory: out_static_graph_gpsatt
+- Label column: label (0/1), timestamp column: timestamp (not used as a feature)
+- Output directories:
     gpsresult/figures/<ablate_no_time | ablate_no_space>
     gpsresult/checkpoints/<ablate_no_time | ablate_no_space>
 """
@@ -28,10 +28,10 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# 支持消融开关的模型
+# Model that supports ablation switches
 from model.st_graph_tcn_ablation import STGraphTCN  # forward(..., disable_temporal=bool, disable_spatial=bool)
 
-# ========= 全局裁剪（对 train/val/test 一致） =========
+# ========= Global head crop (consistent for train/val/test) =========
 UAD_GLOBAL_HEAD_CROP: int = 1000
 
 DEBUG_NUMERICS: bool = True
@@ -64,19 +64,19 @@ def uad_configure_sdpa_kernels():
             pass
 uad_configure_sdpa_kernels()
 
-# ========= 配置 =========
+# ========= Configuration =========
 @dataclass
 class UADConfig:
-    # 数据与图
+    # Data and graph
     uad_use_all_nofail: bool = True
     uad_nofail_dir: str = "gpsdata/No_Failure"
     uad_fail_dir: str = "gpsdata/Failure"
     uad_graph_dir: str = "out_static_graph_gpsatt"
 
-    # Benign 单文件内部切分比例（No_Failure 仅 1 个文件时生效）
+    # Benign single-file split ratio (only when No_Failure has 1 file)
     uad_val_ratio: float = 0.20
 
-    # 训练参数
+    # Training parameters
     uad_lookback: int = 32
     uad_horizon: int = 1
     uad_stride: int = 1
@@ -89,7 +89,7 @@ class UADConfig:
     uad_huber_delta: float = 1.0
     uad_lambda_delta: float = 0.2
 
-    # 模型容量
+    # Model capacity
     uad_d_model: int = 64
     uad_nhead: int = 8
     uad_tcn_layers: int = 4
@@ -100,16 +100,16 @@ class UADConfig:
     uad_horizon_out: int = 1
     uad_use_dynamic_graph: bool = True
 
-    # 可视化输出目录（gpsresult）
+    # Visualization output directory (gpsresult)
     uad_topk_nodes_viz: int = 12
     uad_fig_dir: str = os.path.join("gpsresult", "figures")
 
-    # 杂项
+    # Misc
     uad_device: str = "cuda" if torch.cuda.is_available() else "cpu"
     uad_ckpt_dir: str = os.path.join("gpsresult", "checkpoints")
     uad_seed: int = 42
 
-    # 输入平滑
+    # Input smoothing
     uad_enable_smooth: bool = True
     uad_smooth_method: str = "ema"   # "ema" | "ma" | "savgol"
     uad_ema_alpha: float = 0.1
@@ -118,36 +118,36 @@ class UADConfig:
     uad_savgol_poly: int = 3
     uad_causal_smooth: bool = True
 
-    # 残差聚合与阈值
+    # Residual aggregation and thresholds
     uad_use_delta_residual: bool = True
     uad_topk_ratio: float = 0.5
     uad_thr_mode: str = "mad"        # "mad" | "quantile" | "gauss" | "gev"
     uad_thr_quantile: float = 0.995
 
-    # 后处理
+    # Post-processing
     uad_post_min_run: int = 0
     uad_post_gap: int = 0
 
-    # 标签信息
+    # Label info
     uad_label_col: str = "label"
     uad_label_shift: int = 0
 
-    # 关闭测试额外头裁剪（避免与 30/70 切分重叠）
+    # Disable extra test head-crop (avoid overlap with 30/70 split)
     uad_test_crop_head: int = 0
 
-    # 维度鲁棒
+    # Dimensional robustness
     uad_dim_filter_mode: str = "skill"  # "skill" | "topq" | "off"
     uad_dim_filter_topq: float = 0.10
     uad_dim_filter_min_keep: int = 24
     uad_dim_weight_mode: str = "none" # "inv_mad" | "none"
     uad_norm_mode: str = "zscore"        # "zscore" | "none"
 
-    # 角度展开与增量残差
+    # Angle unwrapping and delta residuals
     uad_angle_unwrap: bool = True
     uad_angle_regex: str = r"(heading|yaw|psi)"
     uad_delta_regex: str = r"(wp_dist|alt_error|aspd_error)"
 
-    # 分数平滑
+    # Score smoothing
     uad_score_smooth: bool = True
     uad_score_smooth_method: str = "ema"  # "bi_ewma" | "ema" | "ma" | "savgol"
     uad_score_causal: bool = True
@@ -156,12 +156,12 @@ class UADConfig:
     uad_score_savgol_window: int = 11
     uad_score_savgol_poly: int = 3
 
-    # top-k 聚合器
+    # Top-k aggregator
     uad_topk_agg: str = "trimmed_mean"  # "mean" | "median" | "trimmed_mean"
     uad_topk_trim_ratio: float = 0.15
     uad_topk_trim_high_only: bool = True
 
-    # 文件内自适应阈值
+    # Per-file adaptive threshold
     uad_enable_file_thr: bool = True
     uad_file_pct: float = 0.25
     uad_file_thr_mode: str = "mad"   # "mad" | "gauss"
@@ -174,14 +174,14 @@ class UADConfig:
     uad_sched_type: str = "cosine"  # "cosine" | "plateau"
     uad_warmup_epochs: int = 3
 
-    # 文件自适应归一化 AdaNorm
+    # Per-file adaptive normalization (AdaNorm)
     uad_enable_adaptnorm: bool = True
     uad_adaptnorm_alpha: float = 0.7
 
-    # 消融模式占位（运行时由 _run_one_mode 设置）
+    # Ablation mode placeholder (set at runtime by _run_one_mode)
     uad_ablation_mode: str = "no_time"  # "no_time" | "no_space"
 
-# ========= 平滑 =========
+# ========= Smoothing =========
 def uad_input_smooth(df: pd.DataFrame, cfg: UADConfig) -> pd.DataFrame:
     if not cfg.uad_enable_smooth: return df
     m = (cfg.uad_smooth_method or "ema").lower()
@@ -237,7 +237,7 @@ def uad_score_smooth(scores: np.ndarray, cfg: UADConfig) -> np.ndarray:
     if m=="savgol": return _savgol(scores, cfg.uad_score_savgol_window, cfg.uad_score_savgol_poly)
     return scores.astype(np.float32)
 
-# ========= 列预处理 =========
+# ========= Column preprocessing =========
 def _unwrap_angles(series: pd.Series) -> pd.Series:
     v = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64)
     if np.nanmax(np.abs(v)) > 3.5: v = np.deg2rad(v)
@@ -253,7 +253,7 @@ def uad_preprocess_cols(df: pd.DataFrame, cols: List[str], cfg: UADConfig) -> pd
             except Exception: pass
     return Xdf
 
-# ========= 标准化器 =========
+# ========= Standardizer =========
 class UADStandardizer:
     def __init__(self): self.mu=None; self.sd=None
     def fit(self, X: np.ndarray):
@@ -263,7 +263,7 @@ class UADStandardizer:
     def transform(self, X: np.ndarray):   return (X - self.mu) / self.sd
     def inverse(self, Xn: np.ndarray):     return Xn*self.sd + self.mu
 
-# ========= 图 I/O =========
+# ========= Graph I/O =========
 def uad_load_keep_columns(graph_dir: str) -> Optional[List[str]]:
     p = os.path.join(graph_dir, "keep_columns.json")
     if not os.path.exists(p): return None
@@ -304,7 +304,7 @@ def uad_load_graph(graph_dir: str):
     keep_cols = uad_load_keep_columns(graph_dir)
     if keep_cols is None:
         if not os.path.exists(nodes_fp):
-            raise FileNotFoundError("未找到 keep_columns.json 或 nodes.csv")
+            raise FileNotFoundError("Missing keep_columns.json or nodes.csv")
         df_nodes = pd.read_csv(nodes_fp)
         if "name" in df_nodes.columns: keep_cols = df_nodes["name"].astype(str).tolist()
         elif "label" in df_nodes.columns: keep_cols = df_nodes["label"].astype(str).tolist()
@@ -330,7 +330,7 @@ def uad_load_graph(graph_dir: str):
             except Exception: A=None
 
     if A is None:
-        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"缺少: {adj_dense_fp} & {adj_sparse_fp}")
+        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"Missing: {adj_dense_fp} & {adj_sparse_fp}")
         dfs = pd.read_csv(adj_sparse_fp)  # row,col,val
         A = np.zeros((N,N), dtype=np.float32)
         r = np.asarray(dfs.get("row", dfs.columns[0]).values, dtype=int)
@@ -355,8 +355,8 @@ def uad_load_graph(graph_dir: str):
 # ========= Dataset =========
 class UADDataset(Dataset):
     """
-    支持 ranges: {basename: (start, end)}，范围建立在“全局裁剪之后”的索引系上。
-    仅在 [start, end) 内产生滑窗起点 t0。
+    Supports ranges: {basename: (start, end)}, indexed after the global head-crop.
+    Only create sliding-window start t0 within [start, end).
     """
     def __init__(self, files: List[str], cols: List[str], scaler: Optional[UADStandardizer],
                  lookback: int, horizon: int, stride: int = 1, cfg: Optional[UADConfig] = None,
@@ -371,7 +371,7 @@ class UADDataset(Dataset):
     def _load_one(self, fp: str):
         df = pd.read_csv(fp)
         miss=[c for c in self.cols if c not in df.columns]
-        if miss: raise ValueError(f"[{os.path.basename(fp)}] 列缺失：{miss[:8]} ...")
+        if miss: raise ValueError(f"[{os.path.basename(fp)}] Missing columns: {miss[:8]} ...")
         Xdf = uad_preprocess_cols(df, self.cols, self.cfg)
         Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
         Xdf = uad_input_smooth(Xdf, self.cfg)
@@ -423,7 +423,7 @@ def uad_collate(batch):
     xs, ys = zip(*batch)
     return torch.stack(xs,0), torch.stack(ys,0)
 
-# ========= 残差/聚合/阈值 =========
+# ========= Residuals / aggregation / thresholds =========
 def uad_robust_med_mad(E: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     med = np.median(E, axis=0)
     mad = np.median(np.abs(E - med[None,:]), axis=0)
@@ -621,7 +621,7 @@ def uad_mixup_batch(x, y, alpha=0.4):
     x2, y2 = x[idx], y[idx]
     return lam * x + (1 - lam) * x2, lam * y + (1 - lam) * y2
 
-# ========= 绘图 =========
+# ========= Plotting =========
 def uad_plot_train_curves(hist, out_png):
     plt.figure(); plt.plot(hist["train"], label="train"); plt.plot(hist["val"], label="val")
     plt.xlabel("epoch"); plt.ylabel("loss"); plt.title("Forecast loss"); plt.legend()
@@ -662,13 +662,13 @@ def uad_labels_from_file(file_path, length: int, lookback:int, horizon:int, labe
         return y
     return np.zeros((length,), dtype=np.int32)
 
-# ========= 滚动预测 =========
+# ========= Rolling forecast =========
 @torch.no_grad()
 def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback, horizon, cfg: UADConfig,
                          crop_head_rows: int = 0, disable_temporal: bool=False, disable_spatial: bool=False):
     df = pd.read_csv(file_path)
     miss=[c for c in cols if c not in df.columns]
-    if miss: raise ValueError(f"[{os.path.basename(file_path)}] 列缺失：{miss[:8]} ...")
+    if miss: raise ValueError(f"[{os.path.basename(file_path)}] Missing columns: {miss[:8]} ...")
 
     Xdf = uad_preprocess_cols(df, cols, cfg)
     Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
@@ -686,7 +686,7 @@ def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback,
     if scaler is not None:
         X = np.nan_to_num(scaler.transform(X), nan=0.0, posinf=0.0, neginf=0.0)
 
-    # AdaNorm（文件前段）可选
+    # AdaNorm (early part of file) optional
     if cfg.uad_enable_adaptnorm and X.shape[0] >= 50:
         L = max(50, int(round(X.shape[0]*cfg.uad_file_pct)))
         mu_f = np.nanmean(X[:L], axis=0); sd_f = np.nanstd(X[:L], axis=0); sd_f = np.maximum(sd_f, 1e-8)
@@ -713,7 +713,7 @@ def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback,
         return np.empty((0,N)), np.empty((0,N)), np.array([],dtype=int), np.empty((0,N))
     return np.vstack(preds), np.vstack(truth), np.array(t_idx,dtype=int), np.vstack(naives)
 
-# ========= 后处理 =========
+# ========= Post-processing =========
 def uad_postprocess(bits: np.ndarray, min_run: int = 8, gap: int = 4) -> np.ndarray:
     x = bits.astype(np.int32).copy()
     i=0
@@ -734,30 +734,30 @@ def uad_postprocess(bits: np.ndarray, min_run: int = 8, gap: int = 4) -> np.ndar
         else: i+=1
     return x
 
-# ========= 训练器 =========
+# ========= Trainer =========
 class UADTrainer:
     def __init__(self, cfg: UADConfig):
         self.cfg=cfg
         uad_makedirs(cfg.uad_fig_dir, True); uad_makedirs(cfg.uad_ckpt_dir, True)
         uad_set_seed(cfg.uad_seed)
 
-        # 消融标志
+        # Ablation flags
         if cfg.uad_ablation_mode == "no_time":
             self.disable_temporal, self.disable_spatial = True, False
         elif cfg.uad_ablation_mode == "no_space":
             self.disable_temporal, self.disable_spatial = False, True
         else:
-            raise ValueError("uad_ablation_mode 必须是 'no_time' 或 'no_space'")
+            raise ValueError("uad_ablation_mode must be 'no_time' or 'no_space'")
 
         # graph
         self.node_names, self.A, self.M, self.topk_order = uad_load_graph(cfg.uad_graph_dir)
         self.A=self.A.to(cfg.uad_device); self.M=self.M.to(cfg.uad_device)
         print(f"[DBG] keep_columns -> {len(self.node_names)} features (sample: {self.node_names[:5]})")
 
-        # ---- Benign (No_Failure) 构建 ----
+        # ---- Benign (No_Failure) build ----
         all_files = uad_list_csvs(cfg.uad_nofail_dir)
         if not all_files:
-            raise FileNotFoundError("未找到 No_Failure 文件（Benign CSV）。")
+            raise FileNotFoundError("No No_Failure files found (Benign CSV).")
 
         self.single_file_ranges_train: Dict[str, Tuple[int,int]] = {}
         self.single_file_ranges_val: Dict[str, Tuple[int,int]] = {}
@@ -781,7 +781,10 @@ class UADTrainer:
             Xi = self._load_for_scaler(only)
             T = Xi.shape[0]
             if T < (cfg.uad_lookback + cfg.uad_horizon) * 3:
-                raise RuntimeError(f"单文件长度不足以切分：有效长度={T}。可减少 UAD_GLOBAL_HEAD_CROP 或缩短 lookback。")
+                raise RuntimeError(
+                    f"Single file too short to split: effective length={T}. "
+                    "Reduce UAD_GLOBAL_HEAD_CROP or shorten lookback."
+                )
             t_split = int((1.0 - cfg.uad_val_ratio) * T)
             need = cfg.uad_lookback + cfg.uad_horizon + 16
             t_split = max(need, min(T - need, t_split))
@@ -794,37 +797,39 @@ class UADTrainer:
             Xcat = Xi[:t_split, :]
 
         if Xcat.size == 0:
-            raise RuntimeError("全局裁剪/切分后训练数据为空，请检查 UAD_GLOBAL_HEAD_CROP 或数据长度。")
+            raise RuntimeError(
+                "Training data empty after global crop/split; check UAD_GLOBAL_HEAD_CROP or data length."
+            )
 
-        # ---- Failure 前 30% 加入训练；后 70% 做测试 ----
+        # ---- Failure: first 30% for training; last 70% for testing ----
         fail_files = uad_list_csvs(cfg.uad_fail_dir)
         self.failure_ranges_train: Dict[str, Tuple[int,int]] = {}
         self.failure_ranges_test:  Dict[str, Tuple[int,int]] = {}
         self.fail_base2path: Dict[str, str] = {os.path.basename(p): p for p in fail_files}
 
         for p in fail_files:
-            Xi_fail = self._load_for_scaler(p)   # 已全局裁剪 & 预处理
+            Xi_fail = self._load_for_scaler(p)   # globally head-cropped & preprocessed
             T = Xi_fail.shape[0]
             if T < (cfg.uad_lookback + cfg.uad_horizon) * 2:
-                print(f"[WARN] Failure 文件过短，跳过：{os.path.basename(p)} (len={T})")
+                print(f"[WARN] Failure file too short, skipping: {os.path.basename(p)} (len={T})")
                 continue
             t30 = int(round(0.30 * T))
             need = cfg.uad_lookback + cfg.uad_horizon + 8
-            t30 = max(need, min(T - need, t30))  # 避免任一段太短
+            t30 = max(need, min(T - need, t30))  # avoid segments that are too short
 
             base = os.path.basename(p)
             self.failure_ranges_train[base] = (0, t30)
             self.failure_ranges_test[base]  = (t30, T)
 
-            # 训练统计（scaler）并入 Failure 的训练段
+            # Include Failure training segment in scaler statistics
             if t30 > 0:
                 Xcat = np.concatenate([Xcat, Xi_fail[:t30, :]], axis=0)
 
-        # 运行期恒值列剔除 & 同步裁剪 A/M
+        # Drop constant columns at runtime & trim A/M accordingly
         var=np.nanstd(Xcat,axis=0); mask_keep=(var>1e-12)
         if not mask_keep.all():
             dropped=[self.node_names[i] for i,b in enumerate(mask_keep) if not b]
-            print(f"[WARN] 运行期恒值列剔除：{dropped[:10]}{'...' if len(dropped)>10 else ''}")
+            print(f"[WARN] Dropped constant columns at runtime: {dropped[:10]}{'...' if len(dropped)>10 else ''}")
             self.node_names=[c for c,b in zip(self.node_names, mask_keep) if b]
             Xcat=Xcat[:,mask_keep]
             idx=torch.from_numpy(np.where(mask_keep)[0].astype(np.int64)).to(cfg.uad_device)
@@ -833,7 +838,7 @@ class UADTrainer:
 
         self.scaler=UADStandardizer(); self.scaler.fit(Xcat)
 
-        # —— DataLoaders：把 Failure 的前 30% 范围合并进训练集 ——
+        # —— DataLoaders: merge Failure first-30% ranges into training set ——
         ranges_train = dict(self.single_file_ranges_train)
         ranges_train.update(self.failure_ranges_train)
 
@@ -851,7 +856,7 @@ class UADTrainer:
         )
         print(f"[Data] train windows: {len(self.tr_loader.dataset):,} | val windows: {len(self.va_loader.dataset):,}")
 
-        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model 必须能被 nhead 整除。")
+        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model must be divisible by nhead.")
 
         # model
         self.model = STGraphTCN(num_nodes_hint=len(self.node_names), in_feat=1,
@@ -877,7 +882,7 @@ class UADTrainer:
                 break
         self.ema = UADEMA(self.model, decay=cfg.uad_ema_decay)
 
-        # 测试对列（Failure 后 70%）
+        # Test pairs (Failure last 70%)
         self.test_pairs: List[Tuple[str, Tuple[int,int]]] = []
         for base, rg in self.failure_ranges_test.items():
             p = self.fail_base2path.get(base, None)
@@ -887,14 +892,14 @@ class UADTrainer:
         print(f"[DBG] test files: {len(self.test_pairs)} -> "
               f"{[os.path.basename(p) + f'[{r[0]}:{r[1]} )' for p,r in self.test_pairs]}")
 
-        # 占位
+        # Placeholders
         self.keep_mask=None; self.dim_weights=None; self.resid_stats=None
         self.delta_mask = uad_build_delta_mask(self.node_names, self.cfg)
 
     def _load_for_scaler(self, p: str) -> np.ndarray:
         df = pd.read_csv(p)
         miss=[c for c in self.node_names if c not in df.columns]
-        if miss: raise ValueError(f"[{os.path.basename(p)}] 列缺失：{miss[:8]} ...")
+        if miss: raise ValueError(f"[{os.path.basename(p)}] Missing columns: {miss[:8]} ...")
         Xi=uad_preprocess_cols(df, self.node_names, self.cfg)
         Xi=Xi.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
         Xi=uad_input_smooth(Xi, self.cfg)
@@ -985,15 +990,15 @@ class UADTrainer:
     @torch.no_grad()
     def _collect_train_residuals(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        收集训练残差用于阈值标定：
-        - Benign 多文件：遍历训练文件（已 head-crop）
-        - 单 Benign 文件：仅取训练段范围
-        - Failure：仅取每个文件的前 30% 训练段
+        Collect training residuals for threshold calibration:
+        - Benign multi-file: iterate training files (head-cropped)
+        - Single benign file: only the training segment
+        - Failure: only the first 30% training segment per file
         """
         E_model_all, E_naive_all = [], []
         range_map = {}
-        range_map.update(self.single_file_ranges_train)   # Benign 的训练段（若有）
-        range_map.update(self.failure_ranges_train)       # Failure 的前 30%
+        range_map.update(self.single_file_ranges_train)   # Benign training segment (if any)
+        range_map.update(self.failure_ranges_train)       # Failure first 30%
 
         train_sources = set(self.train_paths)
         for base in self.failure_ranges_train.keys():
@@ -1023,7 +1028,7 @@ class UADTrainer:
             E_model_all.append(uad_perdim_errors(truth,preds,self.delta_mask))
             E_naive_all.append(uad_perdim_errors(truth,naive,self.delta_mask))
 
-        if not E_model_all: raise RuntimeError("训练残差收集失败。")
+        if not E_model_all: raise RuntimeError("Failed to collect training residuals.")
         return np.vstack(E_model_all), np.vstack(E_naive_all)
 
     @torch.no_grad()
@@ -1094,7 +1099,7 @@ class UADTrainer:
             disable_spatial =self.disable_spatial,
         )
         if preds_full.shape[0]==0:
-            print(f"[Skip] {base}: 数据过短"); return None
+            print(f"[Skip] {base}: data too short"); return None
 
         labels_full = uad_labels_from_file(
             file_path, length=preds_full.shape[0],
@@ -1107,7 +1112,7 @@ class UADTrainer:
             a,b = eval_range
             mask = (t_idx >= a) & (t_idx < b)
             if not np.any(mask):
-                print(f"[Skip] {base}: 指定评估范围无可用窗口")
+                print(f"[Skip] {base}: no valid windows in the specified eval range")
                 return None
             preds = preds_full[mask]; truth = truth_full[mask]; naive = naive_full[mask]
             times = t_idx[mask]; labels = labels_full[mask]
@@ -1189,10 +1194,10 @@ class UADTrainer:
             pd.DataFrame(results).to_csv(out_fp, index=False)
             print(f"[DBG] saved test summary to {out_fp}")
 
-# ========= main：一次跑两份消融 =========
+# ========= main: run both ablations =========
 def _run_one_mode(base_cfg: UADConfig, ablation_mode: str, out_suffix: str):
     cfg = replace(base_cfg, uad_ablation_mode=ablation_mode)
-    # 各自输出目录隔离
+    # Isolate output directories
     cfg.uad_fig_dir = os.path.join(base_cfg.uad_fig_dir, out_suffix)
     cfg.uad_ckpt_dir = os.path.join(base_cfg.uad_ckpt_dir, out_suffix)
     uad_makedirs(cfg.uad_fig_dir, True); uad_makedirs(cfg.uad_ckpt_dir, True)
@@ -1202,9 +1207,9 @@ def _run_one_mode(base_cfg: UADConfig, ablation_mode: str, out_suffix: str):
 
 def main():
     base = UADConfig()
-    # Ablation-A: 去除时间侧（仅空间） -> 禁用时间分支
+    # Ablation-A: remove temporal branch (spatial only)
     _run_one_mode(base_cfg=base, ablation_mode="no_time",  out_suffix="ablate_no_time")
-    # Ablation-B: 去除空间侧（仅时间） -> 禁用空间分支
+    # Ablation-B: remove spatial branch (temporal only)
     _run_one_mode(base_cfg=base, ablation_mode="no_space", out_suffix="ablate_no_space")
 
 if __name__ == "__main__":
