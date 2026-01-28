@@ -5,27 +5,27 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-# 根目录（请按需修改）
+# Base directory (adjust as needed)
 BASE_DIR = r"Live GPS Spoofing and Jamming"
 
-# 需要处理的子目录名
+# Subfolders to process
 SUBFOLDERS = ["Benign Flight", "GPS Jamming", "GPS Spoofing"]
 
-# 打标签阈值（度），与原仓库一致（约公里级）
+# Label threshold (degrees), matching the original repo (about kilometer scale)
 DEG_THRESHOLD = 0.03
 
 
 def read_csv_sorted(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     if "timestamp" not in df.columns:
-        raise ValueError(f"{path.name} 缺少 'timestamp' 列")
+        raise ValueError(f"{path.name} is missing the 'timestamp' column")
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
 def find_topic_csv(folder: Path, keys: list[str]) -> Path | None:
     """
-    在 folder 内查找包含任一 key 的 CSV 文件（如 *vehicle_gps_position_0*.csv）
-    返回匹配到的第一份。若未找到，返回 None。
+    Find a CSV in folder containing any key (e.g., *vehicle_gps_position_0*.csv).
+    Return the first match; return None if not found.
     """
     for key in keys:
         for p in sorted(folder.glob(f"*{key}*.csv")):
@@ -35,7 +35,7 @@ def find_topic_csv(folder: Path, keys: list[str]) -> Path | None:
 
 def merge_chain_outer(dfs: list[pd.DataFrame | None]) -> pd.DataFrame:
     """
-    依次用 outer-merge(on='timestamp') 链式合并。
+    Chain outer-merge(on='timestamp') in order.
     """
     final = pd.DataFrame()
     for df in dfs:
@@ -46,13 +46,13 @@ def merge_chain_outer(dfs: list[pd.DataFrame | None]) -> pd.DataFrame:
         else:
             final = final.merge(df, how="outer", on="timestamp")
     if final.empty:
-        raise RuntimeError("合并结果为空，请检查四个话题 CSV 是否存在。")
+        raise RuntimeError("Merged result is empty; check whether the four topic CSVs exist.")
     return final
 
 
 def linear_interpolate_on_timestamp(df: pd.DataFrame) -> pd.DataFrame:
     """
-    timestamp 排序 → 设为索引 → 线性插值（双向补齐）→ 恢复列
+    Sort by timestamp → set index → linear interpolation (both directions) → restore columns
     """
     df = df.sort_values("timestamp").set_index("timestamp")
     df = df.interpolate(axis=0, method="linear", limit_direction="both")
@@ -61,7 +61,7 @@ def linear_interpolate_on_timestamp(df: pd.DataFrame) -> pd.DataFrame:
 
 def drop_extra_timestamp_like_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
-    删除除主 'timestamp' 外，任何列名包含 'timestamp' 的列（例如合并产生的 timestamp_x 等）。
+    Drop columns containing 'timestamp' except the main one (e.g., timestamp_x from merges).
     """
     droplist = [c for c in df.columns if ("timestamp" in c and c != "timestamp")]
     if droplist:
@@ -74,11 +74,11 @@ def label_like_original(df: pd.DataFrame,
                         lon_col: str = "lon_x",
                         deg_threshold: float = DEG_THRESHOLD) -> pd.DataFrame:
     """
-    以首行 lat_x/lon_x 为参考点，任何一行若经/纬偏离超过 ±deg_threshold → malicious，否则 benign。
-    若缺少 lat_x/lon_x（或全 NaN），则全部标为 benign 并给出提示。
+    Use first-row lat_x/lon_x as reference; if any row deviates by ±deg_threshold → malicious, else benign.
+    If lat_x/lon_x is missing (or all NaN), label all as benign with a warning.
     """
     if lat_col not in df.columns or lon_col not in df.columns:
-        print(f"[WARN] 未发现 {lat_col}/{lon_col}，label 全设为 'benign'")
+        print(f"[WARN] Missing {lat_col}/{lon_col}; labeling all as 'benign'")
         df["label"] = "benign"
         return df
 
@@ -86,7 +86,7 @@ def label_like_original(df: pd.DataFrame,
     lon = pd.to_numeric(df[lon_col], errors="coerce").ffill().bfill()
 
     if lat.isna().all() or lon.isna().all():
-        print(f"[WARN] {lat_col}/{lon_col} 全为 NaN，label 全设为 'benign'")
+        print(f"[WARN] {lat_col}/{lon_col} are all NaN; labeling all as 'benign'")
         df["label"] = "benign"
         return df
 
@@ -97,17 +97,17 @@ def label_like_original(df: pd.DataFrame,
     )
     df["label"] = np.where(cond, "malicious", "benign")
     vc = df["label"].value_counts(dropna=False)
-    print(f"[INFO] 标签分布：{vc.to_dict()}")
+    print(f"[INFO] Label distribution: {vc.to_dict()}")
     return df
 
 
 def process_one_folder(folder: Path) -> None:
-    print(f"\n==== 处理目录：{folder} ====")
+    print(f"\n==== Processing folder: {folder} ====")
     if not folder.exists():
-        print(f"[WARN] 目录不存在，跳过：{folder}")
+        print(f"[WARN] Folder not found, skipping: {folder}")
         return
 
-    # 话题关键字（兼容 vehicle_* 与省略前缀）
+    # Topic keywords (compatible with vehicle_* and prefix-less)
     topic_keys = {
         "att":  ["vehicle_attitude_0", "attitude_0"],
         "gpos": ["vehicle_global_position_0", "global_position_0"],
@@ -115,7 +115,7 @@ def process_one_folder(folder: Path) -> None:
         "lpos": ["vehicle_local_position_0", "local_position_0"],
     }
 
-    # 查找 4 张 CSV（严格按顺序：att → gpos → gps → lpos）
+    # Find 4 CSVs (strict order: att → gpos → gps → lpos)
     att_path  = find_topic_csv(folder, topic_keys["att"])
     gpos_path = find_topic_csv(folder, topic_keys["gpos"])
     gps_path  = find_topic_csv(folder, topic_keys["gps"])
@@ -125,32 +125,32 @@ def process_one_folder(folder: Path) -> None:
                     ("global_position", gpos_path),
                     ("gps_position", gps_path),
                     ("local_position", lpos_path)]:
-        print(f"[INFO] {name:16s}: {p.name if p else '未找到'}")
+        print(f"[INFO] {name:16s}: {p.name if p else 'not found'}")
 
-    # 读取（缺哪个就 None，仍会继续 outer 合并）
+    # Read (missing ones are None; outer merge continues)
     att_df  = read_csv_sorted(att_path)  if att_path  else None
     gpos_df = read_csv_sorted(gpos_path) if gpos_path else None
     gps_df  = read_csv_sorted(gps_path)  if gps_path  else None
     lpos_df = read_csv_sorted(lpos_path) if lpos_path else None
 
-    # 外连接合并
+    # Outer-join merge
     final_df = merge_chain_outer([att_df, gpos_df, gps_df, lpos_df])
 
-    # 排序 + 线性插值
+    # Sort + linear interpolate
     final_df = linear_interpolate_on_timestamp(final_df)
 
-    # 删除多余 timestamp* 列
+    # Drop extra timestamp* columns
     final_df = drop_extra_timestamp_like_cols(final_df)
 
-    # 按原规则打标签（lat_x/lon_x）
+    # Label per original rule (lat_x/lon_x)
     final_df = label_like_original(final_df, lat_col="lat_x", lon_col="lon_x", deg_threshold=DEG_THRESHOLD)
 
-    # 输出
+    # Output
     out_dir = folder / "CSVs" / "Condensed"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{folder.name}.csv"   # 与原作者命名风格一致：<目录名>.csv
+    out_path = out_dir / f"{folder.name}.csv"   # Keep original naming style: <folder_name>.csv
     final_df.to_csv(out_path, index=False, encoding="utf-8")
-    print(f"[OK] 写出：{out_path}  行数={len(final_df)}, 列数={final_df.shape[1]}")
+    print(f"[OK] Wrote: {out_path}  rows={len(final_df)}, cols={final_df.shape[1]}")
 
 
 def main():

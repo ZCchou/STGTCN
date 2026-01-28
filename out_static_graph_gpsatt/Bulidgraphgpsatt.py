@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 GraphBuild_static_gpsatt.py  (isolated-safe)
-基于 GraphBuild 思路：从单个输入 CSV（默认 Benign Flight.csv）构建特征图。
-- 列筛选：仅数值列；显式排除 timestamp* 与 label；丢弃全 NaN 与**常量列**；
-- 行采样：最多 ROW_SAMPLE_MAX 行（可复现随机采样）；
-- 候选预筛：Spearman |ρ| 的 Top-K（每个特征最多 K 个候选，且需 ≥ PREFILTER_R_MIN）；
-- 指标计算：优先 minepy 的 MIC（MINE），不可用则回退 Spearman |ρ|；
-- 并行：multiprocessing + memmap 共享样本矩阵；
-- 阈值：上三角 Q 分位，含退化回退与过密加严策略；
-- **孤立点防护：阈值之后剔除度 < MIN_DEGREE 的节点（可关）**；
-- 产物：与 GraphBuild 系列一致的文件名写入 out_dir。
+Based on GraphBuild: build a feature graph from a single input CSV (default Benign Flight.csv).
+- Column filtering: numeric columns only; explicitly exclude timestamp* and label; drop all-NaN and **constant columns**.
+- Row sampling: up to ROW_SAMPLE_MAX rows (reproducible sampling).
+- Candidate prefilter: top-K by Spearman |ρ| (up to K per feature, must be ≥ PREFILTER_R_MIN).
+- Metric computation: prefer minepy MIC (MINE); fallback to Spearman |ρ| if unavailable.
+- Parallelism: multiprocessing + memmap shared sample matrix.
+- Threshold: upper-triangle quantile with fallback and density-tightening strategy.
+- **Isolated-node guard: after thresholding, drop nodes with degree < MIN_DEGREE (optional)**.
+- Outputs: write GraphBuild-style filenames into out_dir.
 
-用法示例：
+Usage example:
     python GraphBuild_static_gpsatt.py \
         --in_csv "Benign Flight.csv" \
         --out_dir "./out_static_graph_gpsatt" \
@@ -36,52 +36,52 @@ from typing import Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-# 尝试导入 minepy（优先用于 MIC）
+# Try to import minepy (preferred for MIC)
 try:
     from minepy import MINE
     HAVE_MINEPY = True
 except Exception:
     HAVE_MINEPY = False
 
-# ---------- 命令行参数 ----------
+# ---------- CLI arguments ----------
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_csv", default="./preprocessed/Benign Flight.csv", help="输入数据 CSV")
-    ap.add_argument("--out_dir", default="./out_static_graph_gpsatt", help="输出目录")
+    ap.add_argument("--in_csv", default="./preprocessed/Benign Flight.csv", help="Input data CSV")
+    ap.add_argument("--out_dir", default="./out_static_graph_gpsatt", help="Output directory")
 
-    # 列筛选
-    ap.add_argument("--drop_constant", type=int, default=1, help="是否丢弃常量列（1=是，0=否）")
+    # Column filtering
+    ap.add_argument("--drop_constant", type=int, default=1, help="Drop constant columns (1=yes, 0=no)")
 
-    # 行采样
-    ap.add_argument("--row_sample_max", type=int, default=100000, help="用于构图的最大采样行数")
-    ap.add_argument("--random_seed", type=int, default=42, help="随机种子")
+    # Row sampling
+    ap.add_argument("--row_sample_max", type=int, default=100000, help="Max sampled rows for graph build")
+    ap.add_argument("--random_seed", type=int, default=42, help="Random seed")
 
-    # 候选预筛（Spearman）
-    ap.add_argument("--prefilter_topk", type=int, default=20, help="每个特征保留的候选上限 K")
-    ap.add_argument("--prefilter_r_min", type=float, default=0.15, help="候选最小 |ρ|")
+    # Candidate prefilter (Spearman)
+    ap.add_argument("--prefilter_topk", type=int, default=20, help="Top-K candidates per feature")
+    ap.add_argument("--prefilter_r_min", type=float, default=0.15, help="Minimum candidate |ρ|")
 
-    # MIC 计算
-    ap.add_argument("--mic_sample_max", type=int, default=20000, help="单对 MIC 的最大采样行数")
+    # MIC computation
+    ap.add_argument("--mic_sample_max", type=int, default=20000, help="Max sampled rows per MIC pair")
 
-    # 阈值策略
-    ap.add_argument("--quantile", type=float, default=0.975, help="上三角分位阈值 q")
-    ap.add_argument("--max_density", type=float, default=0.30, help="过密加严的边密度上限")
+    # Threshold strategy
+    ap.add_argument("--quantile", type=float, default=0.975, help="Upper-triangle quantile threshold q")
+    ap.add_argument("--max_density", type=float, default=0.30, help="Max edge density for tightening")
 
-    # 并行
-    ap.add_argument("--processes", type=int, default=0, help="并行进程数（0=cpu_count-1）")
+    # Parallelism
+    ap.add_argument("--processes", type=int, default=0, help="Number of processes (0=cpu_count-1)")
 
-    # 孤立点处理
-    ap.add_argument("--drop_isolated", type=int, default=0, help="是否在阈值后剔除孤立点（1=是，0=否）")
-    ap.add_argument("--min_degree", type=int, default=1, help="保留节点的最小度阈值（默认 1）")
+    # Isolated node handling
+    ap.add_argument("--drop_isolated", type=int, default=0, help="Drop isolated nodes after threshold (1=yes, 0=no)")
+    ap.add_argument("--min_degree", type=int, default=1, help="Minimum degree to keep nodes (default 1)")
 
     return ap.parse_args()
 
 
-# ---------- 列筛选 ----------
+# ---------- Column filtering ----------
 def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
     drop_report = []
 
-    # 显式排除：timestamp* 与 label
+    # Explicitly exclude: timestamp* and label
     explicit_exclude = set()
     for c in df.columns:
         lc = str(c).lower()
@@ -90,7 +90,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
         if lc == "label":
             explicit_exclude.add(c)
 
-    # 仅数值列
+    # Numeric columns only
     num_df = df.select_dtypes(include=[np.number]).copy()
     kept_numeric_cols = list(num_df.columns)
 
@@ -100,7 +100,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
             cols_to_drop.add(c)
             drop_report.append((c, "explicit_exclude"))
 
-    # 全 NaN 列
+    # All-NaN columns
     for c in kept_numeric_cols:
         if c in cols_to_drop:
             continue
@@ -108,7 +108,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
             cols_to_drop.add(c)
             drop_report.append((c, "all_nan"))
 
-    # **常量列**（用户要求必须丢弃）
+    # **Constant columns** (must be dropped per requirement)
     if drop_constant:
         for c in kept_numeric_cols:
             if c in cols_to_drop:
@@ -124,24 +124,24 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
     return keep_cols, drop_report, num_df[keep_cols].astype(np.float32)
 
 
-# ---------- 采样 ----------
+# ---------- Sampling ----------
 def sample_rows(X: pd.DataFrame, row_sample_max: int, seed: int) -> pd.DataFrame:
     if len(X) <= row_sample_max:
         return X.copy()
     return X.sample(n=row_sample_max, random_state=seed).copy()
 
 
-# ---------- 预筛：Spearman 绝对相关 Top-K ----------
+# ---------- Prefilter: Spearman absolute correlation Top-K ----------
 def prefilter_candidates_spearman(X: pd.DataFrame, topk: int, r_min: float) -> List[Tuple[int, int]]:
-    # 缺失填充（Spearman 是秩相关，pairwise NaN 会导致样本减少；这里统一填充中位数）
+    # Fill missing values (Spearman is rank-based; pairwise NaN reduces samples, so fill with median)
     Xf = X.fillna(X.median(numeric_only=True))
     corr = Xf.corr(method="spearman").abs().fillna(0.0).values  # ndarray
     n = corr.shape[0]
     pairs = set()
     for i in range(n):
         r = corr[i].copy()
-        r[i] = -1.0  # 排除自相关
-        # 取 Top-K
+        r[i] = -1.0  # exclude self-correlation
+        # Take Top-K
         k = min(topk, n-1)
         if k <= 0:
             continue
@@ -155,7 +155,7 @@ def prefilter_candidates_spearman(X: pd.DataFrame, topk: int, r_min: float) -> L
     return sorted(pairs)
 
 
-# ---------- 全局 memmap 用于并行 ----------
+# ---------- Global memmap for parallelism ----------
 _MEMMAP_PATH = None
 _MEMMAP_SHAPE = None
 _MEMMAP_DTYPE = np.float32
@@ -172,13 +172,13 @@ def _load_memmap():
 
 def _compute_metric_for_pair(args):
     """
-    进程子任务：对 (i,j) 计算 MIC（minepy），否则回退 Spearman |ρ|。
-    限制 mic_sample_max 行，优先等距抽样（cache 友好）。
+    Worker task: compute MIC (minepy) for (i, j), otherwise fallback to Spearman |ρ|.
+    Limit to mic_sample_max rows, prefer uniform subsampling (cache-friendly).
     """
     i, j, mic_sample_max, seed = args
     Xmm = _load_memmap()
     n_rows = Xmm.shape[0]
-    # 等距抽样
+    # Uniform subsampling
     if n_rows > mic_sample_max:
         step = n_rows / mic_sample_max
         idx = (np.floor(np.arange(mic_sample_max) * step)).astype(int)
@@ -188,7 +188,7 @@ def _compute_metric_for_pair(args):
     xi = Xmm[idx, i].astype(np.float64, copy=False)
     xj = Xmm[idx, j].astype(np.float64, copy=False)
 
-    # 去除 NaN
+    # Drop NaNs
     mask = np.isfinite(xi) & np.isfinite(xj)
     xi = xi[mask]; xj = xj[mask]
     if len(xi) < 5:
@@ -203,7 +203,7 @@ def _compute_metric_for_pair(args):
         except Exception:
             pass
 
-    # 回退 Spearman
+    # Fallback to Spearman
     try:
         r = pd.Series(xi).corr(pd.Series(xj), method="spearman")
         return (i, j, float(abs(r)) if np.isfinite(r) else 0.0)
@@ -211,12 +211,12 @@ def _compute_metric_for_pair(args):
         return (i, j, 0.0)
 
 
-# ---------- 阈值选择 ----------
+# ---------- Threshold selection ----------
 def choose_threshold_upper_quantile(A: np.ndarray, q: float, max_density: float):
     """
-    在邻接矩阵 A（对称，上三角含边，主对角=1）上选择阈值：
-    - 初始 q 分位；若退化（NaN/>=1/无边），向下回退；
-    - 若过密（边密度>max_density），尝试加严。
+    Choose a threshold on adjacency matrix A (symmetric, upper-triangle edges, diagonal=1):
+    - Start at quantile q; if degenerate (NaN/>=1/no edges), fall back downwards;
+    - If too dense (edge density > max_density), tighten the threshold.
     """
     n = A.shape[0]
     if n <= 1:
@@ -231,19 +231,19 @@ def choose_threshold_upper_quantile(A: np.ndarray, q: float, max_density: float)
     def edge_count_at(t):
         return int((A[mask] >= t).sum())
 
-    # 回退
+    # Fallback
     if not np.isfinite(thr) or thr >= 1.0 or edge_count_at(thr) == 0:
         for cand in [0.999, 0.995, 0.99, 0.98, 0.95, 0.90, 0.80, 0.70, 0.60]:
             if edge_count_at(cand) > 0:
                 thr = cand
                 break
         else:
-            thr = 0.0  # 全保留
+            thr = 0.0  # keep all
 
     total_possible = int(mask.sum())
     edges_now = edge_count_at(thr)
 
-    # 加严控制密度
+    # Tighten to control density
     if total_possible > 0 and edges_now / total_possible > max_density:
         for cand in [0.99, 0.995, 0.999]:
             if cand > thr and edge_count_at(cand) / total_possible <= max_density and edge_count_at(cand) > 0:
@@ -254,20 +254,20 @@ def choose_threshold_upper_quantile(A: np.ndarray, q: float, max_density: float)
     return thr, edges_now, total_possible
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 def main():
     args = parse_args()
     in_csv = Path(args.in_csv)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 读数据
+    # Read data
     df = pd.read_csv(in_csv)
 
-    # 列筛选（含常量列丢弃）
+    # Column filtering (including constant columns)
     keep_cols, drop_report, Xnum = filter_columns(df, drop_constant=bool(args.drop_constant))
 
-    # 极端：不足两列（直接导出空产物）
+    # Edge case: fewer than two columns (export empty artifacts)
     if len(keep_cols) < 2:
         (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
         pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
@@ -281,24 +281,24 @@ def main():
         print(f"[WARN] Not enough columns after filtering: {len(keep_cols)}")
         return
 
-    # 行采样
+    # Row sampling
     Xs = sample_rows(Xnum, row_sample_max=args.row_sample_max, seed=args.random_seed)
 
-    # 预筛候选
+    # Prefilter candidates
     print("[INFO] Prefilter candidates by Spearman...")
     cand_pairs = prefilter_candidates_spearman(Xs, topk=args.prefilter_topk, r_min=args.prefilter_r_min)
     print(f"[INFO] Candidate pairs: {len(cand_pairs)} (from {len(keep_cols)} features)")
 
-    # 构建 memmap 供并行
+    # Build memmap for parallelism
     mm_path = str(out_dir / "sample.memmap")
     Xarr = Xs.to_numpy(dtype=np.float32, copy=True)
     with open(mm_path, "wb"):
         pass
     mm = np.memmap(mm_path, mode="w+", dtype=np.float32, shape=Xarr.shape)
     mm[:] = Xarr[:]
-    del mm  # 关闭写视图
+    del mm  # close write view
 
-    # 并行配置
+    # Parallel config
     if args.processes <= 0:
         try:
             import multiprocessing as mp
@@ -308,7 +308,7 @@ def main():
     else:
         procs = args.processes
 
-    # 计算指标（MIC 或 Spearman 回退）
+    # Compute metrics (MIC or Spearman fallback)
     import multiprocessing as mp
     print(f"[INFO] Compute pair metrics with {procs} process(es); minepy={HAVE_MINEPY}")
     tasks = [(i, j, int(args.mic_sample_max), int(args.random_seed)) for (i, j) in cand_pairs]
@@ -316,7 +316,7 @@ def main():
                                       initargs=(mm_path, Xarr.shape)) as pool:
         results = list(pool.imap_unordered(_compute_metric_for_pair, tasks, chunksize=256))
 
-    # 组装邻接矩阵（对称，主对角先置 1.0 便于下游处理；训练侧会再置 0）
+    # Assemble adjacency (symmetric; diag set to 1.0 for downstream, training will set to 0)
     n = len(keep_cols)
     A = np.zeros((n, n), dtype=np.float32)
     np.fill_diagonal(A, 1.0)
@@ -327,12 +327,12 @@ def main():
                     A[i, j] = max(A[i, j], w)
                     A[j, i] = max(A[j, i], w)
 
-    # 阈值选择（上三角）
+    # Threshold selection (upper triangle)
     thr, edges_now, total_possible = choose_threshold_upper_quantile(A, q=args.quantile, max_density=args.max_density)
     print(f"[INFO] Threshold={thr:.6f}  edges={edges_now}/{total_possible}")
 
-    # ====== 孤立点剔除（关键）======
-    # 在阈值之后，统计二值度并按 --min_degree 过滤
+    # ====== Drop isolated nodes (critical) ======
+    # After thresholding, compute binary degree and filter by --min_degree
     if int(args.drop_isolated) == 1:
         deg = np.zeros(n, dtype=np.int32)
         wdeg = np.zeros(n, dtype=np.float32)
@@ -350,16 +350,16 @@ def main():
         if len(removed_idx) > 0:
             removed_names = [keep_cols[i] for i in removed_idx]
             print(f"[INFO] Remove isolated/low-degree nodes: {len(removed_idx)} -> {removed_names[:10]}{' ...' if len(removed_idx)>10 else ''}")
-            # 记录到 drop_report
+            # Record in drop_report
             for nm in removed_names:
                 drop_report.append((nm, "isolated_after_threshold"))
 
-            # 应用过滤
+            # Apply filtering
             A = A[keep_mask][:, keep_mask]
             keep_cols = [c for c, m in zip(keep_cols, keep_mask) if m]
             n = len(keep_cols)
 
-    # ====== 若剔除后不足两列，输出空产物以避免训练崩溃 ======
+    # ====== If fewer than two columns remain, output empty artifacts to avoid training crashes ======
     if n < 2:
         (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
         pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
@@ -377,8 +377,8 @@ def main():
         print(f"[WARN] Too few columns after isolation filtering: {n}")
         return
 
-    # ====== 导出产物（全部基于“剔除孤立点后的列集”）======
-    # keep_columns.json（放最后写，确保是最终列集）
+    # ====== Export artifacts (based on post-isolation column set) ======
+    # keep_columns.json (write last to ensure final columns)
     (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
     pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
 
@@ -386,11 +386,11 @@ def main():
     nodes_df = pd.DataFrame({"id": np.arange(n, dtype=int), "name": keep_cols})
     nodes_df.to_csv(out_dir / "nodes.csv", index=False)
 
-    # adjacency_dense（带行列名）
+    # adjacency_dense (with row/column names)
     adj_df = pd.DataFrame(A, index=keep_cols, columns=keep_cols)
     adj_df.to_csv(out_dir / "adjacency_dense.csv", index=True)
 
-    # 根据最终列集与阈值生成 edges_mic / 稀疏三元组 / 度文件
+    # Generate edges_mic / sparse triplets / degree files from final columns and threshold
     edges = []
     deg = np.zeros(n, dtype=np.int32)
     wdeg = np.zeros(n, dtype=np.float32)
@@ -405,7 +405,7 @@ def main():
     edges_df = pd.DataFrame(edges, columns=["src","dst","weight"]).sort_values("weight", ascending=False)
     edges_df.to_csv(out_dir / "edges_mic.csv", index=False)
 
-    # 稀疏三元组（含对角自环=1）
+    # Sparse triplets (include diagonal self-loop = 1)
     trips = [(i, i, 1.0) for i in range(n)]
     for i in range(n):
         for j in range(i+1, n):
@@ -416,15 +416,15 @@ def main():
     sparse_df = pd.DataFrame(trips, columns=["i","j","weight"])
     sparse_df.to_csv(out_dir / "A_global_sparse.csv", index=False)
 
-    # 度与加权度
+    # Degree and weighted degree
     deg_df = pd.DataFrame({"node": keep_cols, "degree": deg, "weighted_degree": wdeg})
     deg_df.to_csv(out_dir / "degrees.csv", index=False)
 
-    # 元数据（保持 GraphBuild 风格）
+    # Metadata (GraphBuild-style)
     (out_dir / "train_files.txt").write_text(f"{in_csv.name}\n", encoding="utf-8")
     (out_dir / "heldout_files.txt").write_text("", encoding="utf-8")
 
-    # 清理 memmap 临时文件
+    # Clean up memmap temp file
     try:
         os.remove(mm_path)
     except Exception:

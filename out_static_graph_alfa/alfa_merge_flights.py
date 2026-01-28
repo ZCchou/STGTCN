@@ -2,9 +2,9 @@
 """
 alfa_merge_flights.py  (numeric-key version: avoid Timedelta OOB)
 
-- 全程使用浮点秒 t 做 merge_asof 键，不再把 t 转为 Timedelta，规避 OutOfBoundsDatetime
-- 每轮合并前显式按 t 排序，避免 "keys must be sorted"
-- 消除了 to_numeric FutureWarning 的用法
+- Use float seconds t as merge_asof key throughout; avoid converting t to Timedelta to prevent OutOfBoundsDatetime
+- Explicitly sort by t before each merge to avoid "keys must be sorted"
+- Remove to_numeric usage that triggers FutureWarning
 """
 
 import argparse
@@ -280,7 +280,7 @@ def read_topic_csv(csv_path: Path, topic_key: str, keep_all: bool, verbose: bool
     if t_abs is not None and "t_abs" not in df.columns:
         df.insert(1, "t_abs", t_abs.astype(float))
 
-    # 尝试把 object 列转数值（失败就保留原值）
+    # Try to coerce object columns to numeric (keep original on failure)
     for c in df.columns:
         if c in ("t","t_abs"):
             continue
@@ -387,7 +387,7 @@ def merge_topics_for_flight(flight_dir: Path, resample_hz: float, tolerance_ms: 
     # Progressive numeric asof using 't'
     for df in topic_dfs:
         right = df.copy()
-        # 避免 t_abs_x/y 混乱：右侧不再提供 t_abs
+        # Avoid t_abs_x/y confusion: drop t_abs from the right-hand side
         right = right.drop(columns=["t_abs"], errors="ignore")
 
         kwargs = dict(on="t", direction="nearest")

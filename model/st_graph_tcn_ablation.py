@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # model/st_graph_tcn_pred.py
-# 仅新增：forward 的 disable_temporal / disable_spatial 两个开关及最小配套改动
+# Only added: disable_temporal / disable_spatial switches in forward, with minimal supporting changes
 
 import math
 from typing import Optional, Tuple
@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------- 时间侧：Partial Causal Conv + 因果Transformer ----------
+# ---------- Temporal branch: Partial Causal Conv + causal Transformer ----------
 
 class PartialCausalConv1d(nn.Conv1d):
     def __init__(self, in_ch, out_ch, kernel_size, dilation=1):
@@ -69,11 +69,11 @@ class TemporalEncoder(nn.Module):
         device = Ht_in.device
         h, m_out = self.tcn(Ht_in, m_t)
         causal = torch.full((T, T), float('-inf'), device=device).triu(1)
-        key_pad = (m_out < 0.5)  # True=屏蔽
+        key_pad = (m_out < 0.5)  # True=mask
         h = self.trans(h, mask=causal, src_key_padding_mask=key_pad)
         return self.norm(h), (~key_pad).float()
 
-# ---------- 空间侧：注意力诱导动态图 + 静态图融合 ----------
+# ---------- Spatial branch: attention-induced dynamic graph + static fusion ----------
 
 class DynamicGraphAttention(nn.Module):
     def __init__(self, d_model: int, eta: float = 1.0):
@@ -133,7 +133,7 @@ class SpatialEncoder(nn.Module):
         Hn = self.prop(Hn, A_fuse)
         return self.norm(Hn), A_fuse
 
-# ---------- 跨分支同步 ----------
+# ---------- Cross-branch sync ----------
 
 class CrossAttnSync(nn.Module):
     def __init__(self, d_model: int, nhead: int = 4, dropout: float = 0.1):
@@ -173,7 +173,7 @@ class CrossAttnSync(nn.Module):
         Hs_sync_t = self.ln_s(Hs_base + self.do(Hs_s2t))
         return Ht_sync, Hs_sync_t
 
-# ---------- 顶层模型（预测头） ----------
+# ---------- Top-level model (prediction head) ----------
 
 class STGraphTCN(nn.Module):
     def __init__(
@@ -196,14 +196,14 @@ class STGraphTCN(nn.Module):
         self.horizon = int(horizon)
         self.out_feat = int(out_feat) if out_feat is not None else in_feat
 
-        self.feat_proj_t = None  # Linear(N_mic*F -> D) 延迟创建
+        self.feat_proj_t = None  # Lazy init: Linear(N_mic*F -> D)
         self.feat_proj_s = nn.Linear(in_feat, d_model)
 
         self.temporal = TemporalEncoder(d_model, nhead=nhead, tcn_layers=tcn_layers, dropout=dropout)
         self.spatial  = SpatialEncoder(in_ch=d_model, d_model=d_model, eta=eta, beta=beta, dropout=dropout)
         self.cross    = CrossAttnSync(d_model, nhead=nhead, dropout=dropout)
 
-        # 当去空间侧时，用时间特征适配到节点嵌入
+        # When spatial branch is disabled, map temporal features to node embeddings
         self.time_to_node = nn.Linear(d_model, d_model)
 
         self.pred_node = nn.Sequential(
@@ -267,8 +267,8 @@ class STGraphTCN(nn.Module):
                 Zmask: Optional[torch.Tensor] = None,
                 disable_temporal: bool = False, disable_spatial: bool = False):
         """
-        disable_temporal=True: 去时间侧（仅空间侧）
-        disable_spatial=True : 去空间侧（仅时间侧）
+        disable_temporal=True: drop temporal branch (spatial only)
+        disable_spatial=True : drop spatial branch (temporal only)
         """
         B, T, N_all, F = X.shape
         device = X.device
@@ -278,7 +278,7 @@ class STGraphTCN(nn.Module):
         if Zmask is None:
             Zmask = torch.ones(B, T, N_all, device=device)
 
-        # ---------- 时间侧 ----------
+        # ---------- Temporal branch ----------
         X_sel = self._gather_nodes(X, node_index)                       # [B,T,N,F]
         Xt = X_sel.reshape(B, T, -1)                                    # [B,T,N*F]
         self._ensure_time_proj(N, device)
@@ -286,48 +286,48 @@ class STGraphTCN(nn.Module):
         m_t = Zmask.index_select(2, node_index).float().mean(dim=2)     # [B,T]
 
         if not disable_temporal:
-            Ht, m_t_out = self.temporal(Ht_in, m_t)                     # 正常时间编码
+            Ht, m_t_out = self.temporal(Ht_in, m_t)                     # regular temporal encoding
         else:
-            # 去时间侧：不引入时序建模，提供“零影响”的占位
+            # Temporal disabled: no sequence modeling, provide zero-impact placeholder
             Ht = torch.zeros_like(Ht_in)
             m_t_out = torch.ones_like(m_t)
 
-        # ---------- 空间侧 ----------
+        # ---------- Spatial branch ----------
         if not disable_spatial:
             Hs_t, A_fuse_t, node_index_ = self._spatial_all_steps(
                 X, Zmask, A_stat, M_mask, short_patch or self._short_kernel
             )                                                            # [B,T,N,D], [B,T,N,N]
         else:
-            # 去空间侧：不进行图编码，提供占位零张量
+            # Spatial disabled: skip graph encoding, provide zero placeholder
             Hs_t = torch.zeros(B, T, N, self.d_model, device=device)
             A_fuse_t = torch.zeros(B, T, N, N, device=device)
 
-        # ---------- 组装预测输入 ----------
+        # ---------- Assemble prediction inputs ----------
         if (not disable_temporal) and (not disable_spatial):
-            # 原始完整模型：跨分支同步 + 节点预测
+            # Full model: cross-branch sync + node prediction
             Ht_sync, Hs_sync_t = self.cross(Ht, Hs_t[:, -1], m_t_out)
             Hn_last = Hs_sync_t[:, -1]                                  # [B,N,D]
         elif disable_temporal and (not disable_spatial):
-            # 仅空间侧：直接使用空间侧最后时刻的节点表征
+            # Spatial only: use last-step spatial node representations
             Hn_last = Hs_t[:, -1]                                       # [B,N,D]
         elif (not disable_temporal) and disable_spatial:
-            # 仅时间侧：用 Ht 的最后时刻，经线性适配后复制到每个节点
+            # Temporal only: adapt last-step Ht and replicate to each node
             h_t_last = Ht[:, -1, :]                                     # [B,D]
             h_node = self.time_to_node(h_t_last)                         # [B,D]
             Hn_last = h_node.unsqueeze(1).expand(B, N, self.d_model)     # [B,N,D]
         else:
-            # 两侧都禁用（理论不会发生）：退化为零
+            # Both disabled (should not happen): fall back to zeros
             Hn_last = torch.zeros(B, N, self.d_model, device=device)
 
-        # ---------- 预测头 ----------
+        # ---------- Prediction head ----------
         y_flat = self.pred_node(Hn_last)                                # [B,N,H*out_feat]
         y_hat = y_flat.view(B, N, self.horizon, self.out_feat).permute(0, 2, 1, 3)  # [B,H,N,out_feat]
 
         aux = {
             "A_fuse": A_fuse_t[:, -1] if A_fuse_t.numel()>0 else None,
             "A_fuse_t": A_fuse_t if A_fuse_t.numel()>0 else None,
-            "Ht": Ht,                          # 同步前的时间特征（供调试可视化）
-            "Hs_sync_last": Hn_last,           # 进入解码器的节点特征
+            "Ht": Ht,                          # temporal features before sync (debug/visualization)
+            "Hs_sync_last": Hn_last,           # node features entering the decoder
             "node_index": node_index
         }
         return y_hat, aux
