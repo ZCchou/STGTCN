@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 UAV Forecast + Anomaly Detection (Enhanced, Fixed) + Ablations
-- 保持原有功能不变
-- 新增：消融实验（去时间侧 / 去空间侧）在同一脚本内连续运行，并分别输出到不同目录
+- Keep existing functionality unchanged
+- New: ablations (remove temporal / remove spatial) run sequentially in one script with separate outputs
 """
 
 import os, glob, json, math, random, re
@@ -21,7 +21,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from model.st_graph_tcn_ablation import STGraphTCN  # 兼容你现有模型（已在模型内加入消融开关）
+from model.st_graph_tcn_ablation import STGraphTCN  # Compatible with your model (ablation switches added)
 
 # ========= global switches =========
 UAD_GLOBAL_HEAD_CROP: int = 10
@@ -184,7 +184,7 @@ class UADConfig:
     uad_enable_adaptnorm: bool = True
     uad_adaptnorm_alpha: float = 0.7
 
-    # === NEW: ablation control (仅用于 main 内部生成两个配置) ===
+    # === NEW: ablation control (only used in main to generate two configs) ===
     uad_ablation_mode: str = "full"  # "full" | "no_time" | "no_space"
 
 # ========= smoothing (input & score) =========
@@ -292,7 +292,7 @@ def uad_load_graph(graph_dir: str):
 
     keep_cols = uad_load_keep_columns(graph_dir)
     if keep_cols is None:
-        if not os.path.exists(nodes_fp): raise FileNotFoundError("未找到 keep_columns.json 或 nodes.csv")
+        if not os.path.exists(nodes_fp): raise FileNotFoundError("Missing keep_columns.json or nodes.csv")
         df_nodes = pd.read_csv(nodes_fp)
         if "name" in df_nodes.columns: keep_cols = df_nodes["name"].astype(str).tolist()
         elif "label" in df_nodes.columns: keep_cols = df_nodes["label"].astype(str).tolist()
@@ -316,7 +316,7 @@ def uad_load_graph(graph_dir: str):
             except Exception: A=None
 
     if A is None:
-        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"缺少: {adj_dense_fp} & {adj_sparse_fp}")
+        if not os.path.exists(adj_sparse_fp): raise FileNotFoundError(f"Missing: {adj_dense_fp} & {adj_sparse_fp}")
         dfs = pd.read_csv(adj_sparse_fp)  # row,col,val
         A = np.zeros((N,N), dtype=np.float32)
         r = np.asarray(dfs.get("row", dfs.columns[0]).values, dtype=int)
@@ -368,7 +368,7 @@ class UADDataset(Dataset):
     def _load_one(self, fp: str):
         df = pd.read_csv(fp)
         miss=[c for c in self.cols if c not in df.columns]
-        if miss: raise ValueError(f"[{os.path.basename(fp)}] 列缺失：{miss[:8]} ...")
+        if miss: raise ValueError(f"[{os.path.basename(fp)}] Missing columns: {miss[:8]} ...")
         Xdf = uad_preprocess_cols(df, self.cols, self.cfg)
         Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
         Xdf = uad_input_smooth(Xdf, self.cfg)
@@ -667,7 +667,7 @@ def uad_labels_from_file(file_path, length: int, lookback:int, horizon:int, labe
         return y
     return np.zeros((length,), dtype=np.int32)
 
-# ========= rolling forecast (传递消融开关) =========
+# ========= rolling forecast (pass ablation switches) =========
 
 @torch.no_grad()
 def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback, horizon, cfg: UADConfig,
@@ -675,7 +675,7 @@ def uad_rolling_forecast(model, file_path, cols, scaler, A, M, device, lookback,
                          disable_temporal: bool = False, disable_spatial: bool = False):
     df = pd.read_csv(file_path)
     miss=[c for c in cols if c not in df.columns]
-    if miss: raise ValueError(f"[{os.path.basename(file_path)}] 列缺失：{miss[:8]} ...")
+    if miss: raise ValueError(f"[{os.path.basename(file_path)}] Missing columns: {miss[:8]} ...")
 
     Xdf = uad_preprocess_cols(df, cols, cfg)
     Xdf = Xdf.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
@@ -749,13 +749,13 @@ class UADTrainer:
         uad_makedirs(cfg.uad_fig_dir, True); uad_makedirs(cfg.uad_ckpt_dir, True)
         uad_set_seed(cfg.uad_seed)
 
-        # 消融标志（根据 cfg.uad_ablation_mode）
-        self.disable_temporal = (cfg.uad_ablation_mode == "no_space")  # 只保留时间侧 → 禁用空间侧? 注意：模型内部用两个独立开关，这里取逻辑：
-        self.disable_spatial  = (cfg.uad_ablation_mode == "no_time")   # 只保留空间侧 → 禁用时间侧?
-        # 解释：
-        # - no_time  : 去除时间侧 → disable_temporal=True?（在 forward 里按参数传递）
-        # - no_space : 去除空间侧 → disable_spatial=True
-        # 这里命名保持直观，具体传参见 forward 调用处。
+        # Ablation flags (based on cfg.uad_ablation_mode)
+        self.disable_temporal = (cfg.uad_ablation_mode == "no_space")  # keep temporal only → disable spatial
+        self.disable_spatial  = (cfg.uad_ablation_mode == "no_time")   # keep spatial only → disable temporal
+        # Notes:
+        # - no_time  : remove temporal branch → disable_temporal=True (passed in forward)
+        # - no_space : remove spatial branch → disable_spatial=True
+        # Names stay intuitive; see forward calls for exact wiring.
 
         # graph
         self.node_names, self.A, self.M, self.topk_order = uad_load_graph(cfg.uad_graph_dir)
@@ -765,7 +765,7 @@ class UADTrainer:
         # files
         all_files = uad_list_csvs(cfg.uad_nofail_dir) if cfg.uad_use_all_nofail else \
                     uad_build_train_paths(cfg.uad_nofail_dir, cfg.uad_graph_dir, cfg.uad_train_list)
-        if not all_files: raise FileNotFoundError("未找到 No_Failure 文件。")
+        if not all_files: raise FileNotFoundError("No No_Failure files found.")
         tr_files, va_files = uad_split_filelevel(all_files, cfg.uad_val_ratio, seed=cfg.uad_seed)
         self.train_paths = tr_files[:]; self.val_paths = va_files[:]
         print(f"[DBG] total no-failure files={len(all_files)} | train={len(tr_files)} | val={len(va_files)}")
@@ -775,7 +775,7 @@ class UADTrainer:
         for p in tr_files:
             df=pd.read_csv(p)
             miss=[c for c in self.node_names if c not in df.columns]
-            if miss: raise ValueError(f"[{os.path.basename(p)}] 列缺失：{miss[:8]} ...")
+            if miss: raise ValueError(f"[{os.path.basename(p)}] Missing columns: {miss[:8]} ...")
             Xi=uad_preprocess_cols(df, self.node_names, self.cfg)
             Xi=Xi.apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).ffill().bfill()
             Xi=uad_input_smooth(Xi, self.cfg)
@@ -789,11 +789,13 @@ class UADTrainer:
         Xcat=np.concatenate(Xs,axis=0) if len(Xs)>0 else np.empty((0, len(self.node_names)), dtype=np.float32)
 
         if Xcat.size == 0:
-            raise RuntimeError("全局截断后训练数据为空，请检查文件长度或减小 UAD_GLOBAL_HEAD_CROP。")
+            raise RuntimeError(
+                "Training data empty after global crop; check file length or reduce UAD_GLOBAL_HEAD_CROP."
+            )
         var=np.nanstd(Xcat,axis=0); mask_keep=(var>1e-12)
         if not mask_keep.all():
             dropped=[self.node_names[i] for i,b in enumerate(mask_keep) if not b]
-            print(f"[WARN] 运行期恒值列剔除：{dropped[:10]}{'...' if len(dropped)>10 else ''}")
+            print(f"[WARN] Dropped constant columns at runtime: {dropped[:10]}{'...' if len(dropped)>10 else ''}")
             self.node_names=[c for c,b in zip(self.node_names, mask_keep) if b]
             Xcat=Xcat[:,mask_keep]
             idx=torch.from_numpy(np.where(mask_keep)[0].astype(np.int64)).to(cfg.uad_device)
@@ -811,7 +813,7 @@ class UADTrainer:
                                   batch_size=cfg.uad_batch, shuffle=False, num_workers=0, collate_fn=uad_collate)
         print(f"[Data] train windows: {len(self.tr_loader.dataset):,} | val windows: {len(self.va_loader.dataset):,}")
 
-        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model 必须能被 nhead 整除。")
+        if cfg.uad_d_model % cfg.uad_nhead != 0: raise ValueError("d_model must be divisible by nhead.")
 
         # model
         self.model = STGraphTCN(num_nodes_hint=len(self.node_names), in_feat=1,
@@ -940,7 +942,7 @@ class UADTrainer:
             if preds.shape[0]==0: continue
             E_model_all.append(uad_perdim_errors(truth,preds,self.delta_mask))
             E_naive_all.append(uad_perdim_errors(truth,naive,self.delta_mask))
-        if not E_model_all: raise RuntimeError("训练残差收集失败。")
+        if not E_model_all: raise RuntimeError("Failed to collect training residuals.")
         return np.vstack(E_model_all), np.vstack(E_naive_all)
 
     @torch.no_grad()
@@ -1007,7 +1009,7 @@ class UADTrainer:
             disable_spatial =(self.cfg.uad_ablation_mode=="no_space"),
         )
         if preds.shape[0]==0:
-            print(f"[Skip] {base}: 数据过短"); return None
+            print(f"[Skip] {base}: data too short"); return None
 
         uad_plot_forecast(t_idx, truth, preds, self.node_names, self.topk_order,
                           K=self.cfg.uad_topk_nodes_viz,
@@ -1091,11 +1093,11 @@ class UADTrainer:
             pd.DataFrame(results).to_csv(out_fp, index=False)
             print(f"[DBG] saved test summary to {out_fp}")
 
-# ========= main (一次跑两份消融) =========
+# ========= main (run both ablations) =========
 
 def _run_one_mode(base_cfg: UADConfig, ablation_mode: str, out_suffix: str):
     cfg = replace(base_cfg, uad_ablation_mode=ablation_mode)
-    # 各自的输出目录隔离
+    # Isolate output directories
     cfg.uad_fig_dir = os.path.join(base_cfg.uad_fig_dir, out_suffix)
     cfg.uad_ckpt_dir = os.path.join(base_cfg.uad_ckpt_dir, out_suffix)
     uad_makedirs(cfg.uad_fig_dir, True); uad_makedirs(cfg.uad_ckpt_dir, True)
@@ -1106,10 +1108,10 @@ def _run_one_mode(base_cfg: UADConfig, ablation_mode: str, out_suffix: str):
 def main():
     base = UADConfig()
 
-    # Ablation-A: 去除时间侧 -> 仅空间侧（保持空间图/传播，禁用时间分支）
+    # Ablation-A: remove temporal branch -> spatial only (keep graph/prop, disable temporal)
     _run_one_mode(base_cfg=base, ablation_mode="no_time",  out_suffix="ablate_no_time")
 
-    # Ablation-B: 去除空间侧 -> 仅时间侧（保留时间分支，禁用空间分支）
+    # Ablation-B: remove spatial branch -> temporal only (keep temporal, disable spatial)
     _run_one_mode(base_cfg=base, ablation_mode="no_space", out_suffix="ablate_no_space")
 
 if __name__ == "__main__":

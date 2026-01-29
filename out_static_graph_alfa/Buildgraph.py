@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 GraphBuild_static_alfa.py  (dataset-friendly)
-从 ALFA 目录读取 No_Failure 的 80% CSV 合并构图（可调），
-保留原 GraphBuild 的 MIC/阈值/孤立点等逻辑与产物格式。
+Merge 80% of No_Failure CSVs from the ALFA directory to build a graph (configurable),
+keeping the original GraphBuild MIC/threshold/isolation logic and output formats.
 
-用法示例：
+Usage example:
   python GraphBuild_static_alfa.py \
     --alfadata_dir ./alfadata \
     --out_dir ./out_static_graph_alfa \
@@ -26,61 +26,61 @@ from typing import Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-# 尝试导入 minepy（优先用于 MIC）
+# Try to import minepy (preferred for MIC)
 try:
     from minepy import MINE
     HAVE_MINEPY = True
 except Exception:
     HAVE_MINEPY = False
 
-# ---------- 命令行参数 ----------
+# ---------- CLI arguments ----------
 def parse_args():
     ap = argparse.ArgumentParser()
-    # 单文件模式（向后兼容）
-    ap.add_argument("--in_csv", default=None, help="输入数据 CSV（单文件模式）")
+    # Single-file mode (backward compatible)
+    ap.add_argument("--in_csv", default=None, help="Input data CSV (single-file mode)")
 
-    # 数据集模式（优先生效）
-    ap.add_argument("--alfadata_dir", default="../alfadata2", help="ALFA 数据集根目录（含 No_Failure/ 与 Failure/）")
-    ap.add_argument("--no_failure_subdir", default="No_Failure", help="良性子目录名称（默认 No_Failure）")
-    ap.add_argument("--file_glob", default="*.csv", help="CSV 文件通配（默认 *.csv）")
-    ap.add_argument("--no_failure_fraction", type=float, default=0.8, help="用于构图的 No_Failure 文件比例")
-    ap.add_argument("--min_select", type=int, default=1, help="最少选择文件数（防止过小样本）")
+    # Dataset mode (takes precedence)
+    ap.add_argument("--alfadata_dir", default="../alfadata2", help="ALFA dataset root (contains No_Failure/ and Failure/)")
+    ap.add_argument("--no_failure_subdir", default="No_Failure", help="Benign subdir name (default No_Failure)")
+    ap.add_argument("--file_glob", default="*.csv", help="CSV file glob (default *.csv)")
+    ap.add_argument("--no_failure_fraction", type=float, default=0.8, help="Fraction of No_Failure files to build graph")
+    ap.add_argument("--min_select", type=int, default=1, help="Minimum files selected (avoid too small sample)")
 
-    ap.add_argument("--out_dir", default="./out_static_graph_alfa", help="输出目录")
+    ap.add_argument("--out_dir", default="./out_static_graph_alfa", help="Output directory")
 
-    # 列筛选
-    ap.add_argument("--drop_constant", type=int, default=1, help="是否丢弃常量列（1=是，0=否）")
+    # Column filtering
+    ap.add_argument("--drop_constant", type=int, default=1, help="Drop constant columns (1=yes, 0=no)")
 
-    # 行采样（对合并后的总样本）
-    ap.add_argument("--row_sample_max", type=int, default=100000, help="用于构图的最大采样行数")
-    ap.add_argument("--random_seed", type=int, default=42, help="随机种子")
+    # Row sampling (on merged samples)
+    ap.add_argument("--row_sample_max", type=int, default=100000, help="Max sampled rows for graph build")
+    ap.add_argument("--random_seed", type=int, default=42, help="Random seed")
 
-    # 候选预筛（Spearman）
-    ap.add_argument("--prefilter_topk", type=int, default=20, help="每个特征保留的候选上限 K")
-    ap.add_argument("--prefilter_r_min", type=float, default=0.15, help="候选最小 |ρ|")
+    # Candidate prefilter (Spearman)
+    ap.add_argument("--prefilter_topk", type=int, default=20, help="Top-K candidates per feature")
+    ap.add_argument("--prefilter_r_min", type=float, default=0.15, help="Minimum candidate |ρ|")
 
-    # MIC 计算
-    ap.add_argument("--mic_sample_max", type=int, default=20000, help="单对 MIC 的最大采样行数")
+    # MIC computation
+    ap.add_argument("--mic_sample_max", type=int, default=20000, help="Max sampled rows per MIC pair")
 
-    # 阈值策略
-    ap.add_argument("--quantile", type=float, default=0.975, help="上三角分位阈值 q")
-    ap.add_argument("--max_density", type=float, default=0.30, help="过密加严的边密度上限")
+    # Threshold strategy
+    ap.add_argument("--quantile", type=float, default=0.975, help="Upper-triangle quantile threshold q")
+    ap.add_argument("--max_density", type=float, default=0.30, help="Max edge density for tightening")
 
-    # 并行
-    ap.add_argument("--processes", type=int, default=0, help="并行进程数（0=cpu_count-1）")
+    # Parallelism
+    ap.add_argument("--processes", type=int, default=0, help="Number of processes (0=cpu_count-1)")
 
-    # 孤立点处理
-    ap.add_argument("--drop_isolated", type=int, default=0, help="是否在阈值后剔除孤立点（1=是，0=否）")
-    ap.add_argument("--min_degree", type=int, default=1, help="保留节点的最小度阈值（默认 1）")
+    # Isolated node handling
+    ap.add_argument("--drop_isolated", type=int, default=0, help="Drop isolated nodes after threshold (1=yes, 0=no)")
+    ap.add_argument("--min_degree", type=int, default=1, help="Minimum degree to keep nodes (default 1)")
 
     return ap.parse_args()
 
 
-# ---------- 列筛选 ----------
+# ---------- Column filtering ----------
 def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
     drop_report = []
 
-    # 显式排除：timestamp* 与 label
+    # Explicitly exclude: timestamp* and label
     explicit_exclude = set()
     for c in df.columns:
         lc = str(c).lower()
@@ -89,7 +89,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
         if lc == "label":
             explicit_exclude.add(c)
 
-    # 仅数值列
+    # Numeric columns only
     num_df = df.select_dtypes(include=[np.number]).copy()
     kept_numeric_cols = list(num_df.columns)
 
@@ -99,7 +99,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
             cols_to_drop.add(c)
             drop_report.append((c, "explicit_exclude"))
 
-    # 全 NaN 列
+    # All-NaN columns
     for c in kept_numeric_cols:
         if c in cols_to_drop:
             continue
@@ -107,7 +107,7 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
             cols_to_drop.add(c)
             drop_report.append((c, "all_nan"))
 
-    # 常量列
+    # Constant columns
     if drop_constant:
         for c in kept_numeric_cols:
             if c in cols_to_drop:
@@ -123,14 +123,14 @@ def filter_columns(df: pd.DataFrame, drop_constant: bool = True):
     return keep_cols, drop_report, num_df[keep_cols].astype(np.float32)
 
 
-# ---------- 采样 ----------
+# ---------- Sampling ----------
 def sample_rows(X: pd.DataFrame, row_sample_max: int, seed: int) -> pd.DataFrame:
     if len(X) <= row_sample_max:
         return X.copy()
     return X.sample(n=row_sample_max, random_state=seed).copy()
 
 
-# ---------- 预筛：Spearman 绝对相关 Top-K ----------
+# ---------- Prefilter: Spearman absolute correlation Top-K ----------
 def prefilter_candidates_spearman(X: pd.DataFrame, topk: int, r_min: float) -> List[Tuple[int, int]]:
     Xf = X.fillna(X.median(numeric_only=True))
     corr = Xf.corr(method="spearman").abs().fillna(0.0).values
@@ -152,7 +152,7 @@ def prefilter_candidates_spearman(X: pd.DataFrame, topk: int, r_min: float) -> L
     return sorted(pairs)
 
 
-# ---------- 全局 memmap 用于并行 ----------
+# ---------- Global memmap for parallelism ----------
 _MEMMAP_PATH = None
 _MEMMAP_SHAPE = None
 _MEMMAP_DTYPE = np.float32
@@ -200,7 +200,7 @@ def _compute_metric_for_pair(args):
         return (i, j, 0.0)
 
 
-# ---------- 阈值选择 ----------
+# ---------- Threshold selection ----------
 def choose_threshold_upper_quantile(A: np.ndarray, q: float, max_density: float):
     n = A.shape[0]
     if n <= 1:
@@ -236,7 +236,7 @@ def choose_threshold_upper_quantile(A: np.ndarray, q: float, max_density: float)
     return thr, edges_now, total_possible
 
 
-# ---------- 数据集模式：读取 No_Failure 80% 合并 ----------
+# ---------- Dataset mode: merge 80% No_Failure ----------
 def load_no_failure_aggregate(alfadata_dir: Path,
                               subdir_name: str,
                               file_glob: str,
@@ -260,7 +260,7 @@ def load_no_failure_aggregate(alfadata_dir: Path,
     sel_files = [files[i] for i in sel_idx]
     hold_files = [files[i] for i in hold_idx]
 
-    # 先扫一遍，取“公共数值列集合”（排除 timestamp*/label）
+    # First pass: get common numeric columns (exclude timestamp*/label)
     def numeric_cols_exclude(df: pd.DataFrame) -> List[str]:
         explicit_exclude = set()
         for c in df.columns:
@@ -289,16 +289,16 @@ def load_no_failure_aggregate(alfadata_dir: Path,
 
     common_cols = sorted(list(common_cols))
 
-    # 汇总数据（仅取公共数值列），并记录来源文件名列（可选）
+    # Aggregate data (common numeric columns only) and record source file name (optional)
     chunks = []
     used_files = []
     for fp in sel_files:
         try:
             df = pd.read_csv(fp, low_memory=False)
             sub = df[common_cols].copy()
-            # 清理极端 NaN 列（容错：若某文件该公共列全 NaN，就跳过该文件）
+            # Drop extreme NaN columns (if any common column is all-NaN, skip the file)
             if sub.isna().all(axis=0).sum() > 0 and sub.shape[0] > 0:
-                # 若任一公共列在该文件全 NaN，放弃该文件，避免污染
+                # If any common column is all-NaN for this file, skip to avoid contamination
                 if any(sub[c].isna().all() for c in common_cols):
                     print(f"[WARN] Drop file (column all-NaN in this file): {fp.name}")
                     continue
@@ -316,7 +316,7 @@ def load_no_failure_aggregate(alfadata_dir: Path,
     return X, used_files, [f.name for f in hold_files]
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 def main():
     args = parse_args()
     out_dir = Path(args.out_dir)
@@ -324,7 +324,7 @@ def main():
 
     dataset_mode = args.alfadata_dir is not None and Path(args.alfadata_dir).exists()
 
-    # ===== 读取数据 =====
+    # ===== Read data =====
     if dataset_mode:
         alfadata_dir = Path(args.alfadata_dir).resolve()
         print(f"[INFO] Dataset mode: {alfadata_dir} | use {args.no_failure_fraction*100:.1f}% No_Failure files")
@@ -336,7 +336,7 @@ def main():
             min_select=int(args.min_select),
             seed=int(args.random_seed),
         )
-        # 列筛选（含常量列丢弃）
+        # Column filtering (including constant columns)
         keep_cols, drop_report, Xnum = filter_columns(Xall.drop(columns=["_source_file"]), drop_constant=bool(args.drop_constant))
         train_files_text = "\n".join(used_files) + "\n"
         heldout_files_text = "\n".join(heldout_files) + ("\n" if heldout_files else "")
@@ -352,7 +352,7 @@ def main():
         train_files_text = f"{in_csv.name}\n"
         heldout_files_text = ""
 
-    # 极端：不足两列（直接导出空产物）
+    # Edge case: fewer than two columns (export empty artifacts)
     if len(keep_cols) < 2:
         (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
         pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
@@ -366,24 +366,24 @@ def main():
         print(f"[WARN] Not enough columns after filtering: {len(keep_cols)}")
         return
 
-    # 行采样（在筛列之后）
+    # Row sampling (after column filtering)
     Xs = sample_rows(Xnum, row_sample_max=args.row_sample_max, seed=args.random_seed)
 
-    # 预筛候选
+    # Prefilter candidates
     print("[INFO] Prefilter candidates by Spearman...")
     cand_pairs = prefilter_candidates_spearman(Xs, topk=args.prefilter_topk, r_min=args.prefilter_r_min)
     print(f"[INFO] Candidate pairs: {len(cand_pairs)} (from {len(keep_cols)} features)")
 
-    # 构建 memmap 供并行
+    # Build memmap for parallelism
     mm_path = str(out_dir / "sample.memmap")
     Xarr = Xs.to_numpy(dtype=np.float32, copy=True)
     with open(mm_path, "wb"):
         pass
     mm = np.memmap(mm_path, mode="w+", dtype=np.float32, shape=Xarr.shape)
     mm[:] = Xarr[:]
-    del mm  # 关闭写视图
+    del mm  # close write view
 
-    # 并行配置
+    # Parallel config
     if args.processes <= 0:
         try:
             import multiprocessing as mp
@@ -393,7 +393,7 @@ def main():
     else:
         procs = args.processes
 
-    # 计算指标（MIC 或 Spearman 回退）
+    # Compute metrics (MIC or Spearman fallback)
     import multiprocessing as mp
     print(f"[INFO] Compute pair metrics with {procs} process(es); minepy={HAVE_MINEPY}")
     tasks = [(i, j, int(args.mic_sample_max), int(args.random_seed)) for (i, j) in cand_pairs]
@@ -401,7 +401,7 @@ def main():
                                       initargs=(mm_path, Xarr.shape)) as pool:
         results = list(pool.imap_unordered(_compute_metric_for_pair, tasks, chunksize=256))
 
-    # 组装邻接矩阵
+    # Assemble adjacency matrix
     n = len(keep_cols)
     A = np.zeros((n, n), dtype=np.float32)
     np.fill_diagonal(A, 1.0)
@@ -412,11 +412,11 @@ def main():
                     A[i, j] = w
                     A[j, i] = w
 
-    # 阈值选择（上三角）
+    # Threshold selection (upper triangle)
     thr, edges_now, total_possible = choose_threshold_upper_quantile(A, q=args.quantile, max_density=args.max_density)
     print(f"[INFO] Threshold={thr:.6f}  edges={edges_now}/{total_possible}")
 
-    # 孤立点剔除
+    # Drop isolated nodes
     if int(args.drop_isolated) == 1:
         deg = np.zeros(n, dtype=np.int32)
         wdeg = np.zeros(n, dtype=np.float32)
@@ -440,7 +440,7 @@ def main():
             keep_cols = [c for c, m in zip(keep_cols, keep_mask) if m]
             n = len(keep_cols)
 
-    # 极端：剔除后不足两列
+    # Edge case: fewer than two columns after filtering
     if n < 2:
         (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
         pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
@@ -458,7 +458,7 @@ def main():
         print(f"[WARN] Too few columns after isolation filtering: {n}")
         return
 
-    # ====== 导出产物 ======
+    # ====== Export artifacts ======
     (out_dir / "keep_columns.json").write_text(json.dumps(keep_cols, ensure_ascii=False, indent=2), encoding="utf-8")
     pd.DataFrame(drop_report, columns=["column","reason"]).to_csv(out_dir / "drop_columns_report.csv", index=False)
 
@@ -468,7 +468,7 @@ def main():
     adj_df = pd.DataFrame(A, index=keep_cols, columns=keep_cols)
     adj_df.to_csv(out_dir / "adjacency_dense.csv", index=True)
 
-    # edges / 稀疏三元组 / 度
+    # edges / sparse triplets / degree
     edges = []
     deg = np.zeros(n, dtype=np.int32)
     wdeg = np.zeros(n, dtype=np.float32)
@@ -496,11 +496,11 @@ def main():
     deg_df = pd.DataFrame({"node": keep_cols, "degree": deg, "weighted_degree": wdeg})
     deg_df.to_csv(out_dir / "degrees.csv", index=False)
 
-    # 元数据（记录用于构图/保留文件）
+    # Metadata (records for graph build / retained files)
     (out_dir / "train_files.txt").write_text(train_files_text, encoding="utf-8")
     (out_dir / "heldout_files.txt").write_text(heldout_files_text, encoding="utf-8")
 
-    # 清理 memmap
+    # Clean up memmap
     try:
         os.remove(mm_path)
     except Exception:

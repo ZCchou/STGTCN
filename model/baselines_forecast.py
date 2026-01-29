@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # model/baselines_forecast.py
-# 说明：
-# - 六个纯时序预测基线：LSTM / GRU / TCN / MLP / CNNLSTM / Transformer
-# - 统一接口：forward(x, A=None, M=None) -> (y_hat, extras)
-#   输入 x: [B, T, N, 1]; 输出 y_hat: [B, 1, N, 1]
-# - 不使用图信息(A, M)，但参数保留以兼容现有训练/推理代码
+# Notes:
+# - Six pure time-series forecasting baselines: LSTM / GRU / TCN / MLP / CNNLSTM / Transformer
+# - Unified interface: forward(x, A=None, M=None) -> (y_hat, extras)
+#   Input x: [B, T, N, 1]; Output y_hat: [B, 1, N, 1]
+# - Graph info (A, M) is not used, but the arguments remain for compatibility
 
 from typing import Tuple, Optional
 import math
@@ -79,7 +79,7 @@ class Chomp1d(nn.Module):
         self.chomp_size = chomp_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 删去右侧填充，保持因果性
+        # Trim right padding to preserve causality
         if self.chomp_size == 0:
             return x
         return x[:, :, :-self.chomp_size].contiguous()
@@ -118,7 +118,7 @@ class TCNForecaster(nn.Module):
     def __init__(self, num_nodes: int, lookback: int, d_model: int = 128, levels: int = 4,
                  kernel_size: int = 9, dropout: float = 0.15):
         super().__init__()
-        # 输入视为 N 通道、长度 T 的序列：Conv1d over time
+        # Treat input as N channels with length T: Conv1d over time
         layers = []
         ch_in = num_nodes
         for i in range(levels):
@@ -160,11 +160,11 @@ class MLPForecaster(nn.Module):
         return _to_out(y), {}
 
 
-# -------- 新增：CNN + LSTM --------
+# -------- New: CNN + LSTM --------
 class CNNLSTMForecaster(nn.Module):
     """
-    结构：Conv1d(时域)→ReLU/Dropout→(可堆叠)→转置为序列→LSTM→MLP 预测 [B,N]
-    - 将 N 视为通道数，在时域做卷积抽特征，再交给 LSTM 建模长依赖
+    Architecture: Conv1d (time) → ReLU/Dropout → (stackable) → transpose to sequence → LSTM → MLP for [B, N]
+    - Treat N as channels, convolve over time to extract features, then model long dependencies with LSTM
     """
     def __init__(self, num_nodes: int, lookback: int, d_model: int = 128,
                  conv_levels: int = 2, kernel_size: int = 9, dropout: float = 0.15,
@@ -200,7 +200,7 @@ class CNNLSTMForecaster(nn.Module):
         return _to_out(y), {}
 
 
-# -------- 新增：Transformer --------
+# -------- New: Transformer --------
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 10000):
         super().__init__()
@@ -219,8 +219,8 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 class TransformerForecaster(nn.Module):
     """
-    将每个时间步视作 token，特征维 N 线性投影到 d_model，叠加正余弦位置编码，
-    过 TransformerEncoder 后取最后一步 token 表示，MLP 回归到 N。
+    Treat each time step as a token, project N features to d_model, add sinusoidal positional encoding,
+    pass through TransformerEncoder, then take the last token and regress to N with an MLP.
     """
     def __init__(self, num_nodes: int, lookback: int, d_model: int = 128,
                  nhead: int = 8, num_layers: int = 4, dropout: float = 0.1, dim_ff: Optional[int] = None):
